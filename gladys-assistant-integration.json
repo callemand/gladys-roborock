@@ -1,0 +1,27 @@
+{
+  "manifest_version": 1,
+  "type": "device",
+  "name": "Roborock",
+  "description": {
+    "en": "Control your Roborock robot vacuums: state, start/stop, fan power, dock and battery.",
+    "fr": "Pilotez vos aspirateurs robots Roborock : état, marche/arrêt, aspiration, base et batterie."
+  },
+  "version": "1.0.0",
+  "docker_image": "ghcr.io/callemand/gladys-roborock:1.0.0",
+  "gladys_version": ">=4.62.0",
+  "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
+  "config_schema": [
+    {
+      "key": "xiaomi_account",
+      "type": "oauth2",
+      "label": {
+        "en": "Xiaomi account",
+        "fr": "Compte Xiaomi"
+      },
+      "description": {
+        "en": "Authorize access to your Xiaomi Home account. Your robot vacuums are then detected automatically.",
+        "fr": "Autorisez l'accès à votre compte Xiaomi Home. Vos aspirateurs robots sont ensuite détectés automatiquement."
+      }
+    }
+  ]
+}
