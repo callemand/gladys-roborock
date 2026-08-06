@@ -6,53 +6,62 @@ import {
   clearedSessionConfig,
   isSessionUsable,
   readSession,
+  sameSession,
   sessionToConfig,
-} from '../src/xiaomi/session.js';
+} from '../src/session.js';
 
-test('readSession extracts the off-schema session keys', () => {
-  const session = readSession({
-    [SESSION_KEYS.DEVICE_ID]: 'abcdef',
-    [SESSION_KEYS.USER_ID]: '12345',
-    [SESSION_KEYS.PASS_TOKEN]: 'ptoken',
-    [SESSION_KEYS.SSECURITY]: 'c2VjcmV0',
-    [SESSION_KEYS.REGION]: 'de',
-    username: 'user@example.com',
-  });
-  assert.deepEqual(session, {
-    deviceId: 'abcdef',
-    userId: '12345',
-    passToken: 'ptoken',
-    ssecurity: 'c2VjcmV0',
-    region: 'de',
-  });
-});
-
-test('readSession treats blank values as absent', () => {
-  const session = readSession({ [SESSION_KEYS.USER_ID]: '   ', [SESSION_KEYS.PASS_TOKEN]: '' });
-  assert.equal(session.userId, null);
-  assert.equal(session.passToken, null);
-});
-
-test('isSessionUsable requires a userId and a passToken', () => {
-  assert.equal(isSessionUsable({ userId: '1', passToken: 'p' }), true);
-  assert.equal(isSessionUsable({ userId: '1', passToken: null }), false);
-  assert.equal(isSessionUsable({ userId: null, passToken: 'p' }), false);
-  assert.equal(isSessionUsable(null), false);
-});
+const SESSION = {
+  deviceId: 'ghijkl',
+  username: 'user@example.com',
+  token: 'account-token',
+  rriot: { u: 'u', s: 's', h: 'h', k: 'k', r: { a: 'https://api', m: 'ssl://mqtt' } },
+  baseUrl: 'https://euiot.roborock.com',
+};
 
 test('sessionToConfig round-trips through readSession', () => {
-  const session = {
-    deviceId: 'abcdef',
-    userId: '12345',
-    passToken: 'ptoken',
-    ssecurity: 'c2VjcmV0',
-    region: 'de',
-  };
-  assert.deepEqual(readSession(sessionToConfig(session)), session);
+  assert.deepEqual(readSession(sessionToConfig(SESSION)), SESSION);
+});
+
+test('the rriot credentials survive as an object, not a string', () => {
+  const stored = sessionToConfig(SESSION);
+  assert.equal(typeof stored[SESSION_KEYS.RRIOT], 'string');
+  assert.deepEqual(readSession(stored).rriot, SESSION.rriot);
+});
+
+test('readSession treats blank values and malformed rriot as absent', () => {
+  const session = readSession({
+    [SESSION_KEYS.TOKEN]: '   ',
+    [SESSION_KEYS.USERNAME]: '',
+    [SESSION_KEYS.RRIOT]: 'not json',
+  });
+  assert.equal(session.token, null);
+  assert.equal(session.username, null);
+  assert.equal(session.rriot, null);
+});
+
+test('isSessionUsable requires what a silent reconnection actually needs', () => {
+  // the token alone gets nowhere: every IoT call is signed with the rriot secrets
+  assert.equal(isSessionUsable(SESSION), true);
+  assert.equal(isSessionUsable({ ...SESSION, token: null }), false);
+  assert.equal(isSessionUsable({ ...SESSION, rriot: null }), false);
+  assert.equal(isSessionUsable(null), false);
 });
 
 test('clearedSessionConfig blanks every session key', () => {
   const cleared = clearedSessionConfig();
   Object.values(SESSION_KEYS).forEach((key) => assert.equal(cleared[key], ''));
   assert.equal(isSessionUsable(readSession(cleared)), false);
+});
+
+test('sameSession tells our own config write apart from a real change', () => {
+  assert.equal(sameSession(SESSION, { ...SESSION }), true);
+  assert.equal(sameSession(SESSION, { ...SESSION, token: 'other' }), false);
+  // the rriot object is compared by value: it comes back parsed from JSON, so it
+  // is never the same object, and comparing by reference would loop for ever
+  assert.equal(
+    sameSession(SESSION, { ...SESSION, rriot: JSON.parse(JSON.stringify(SESSION.rriot)) }),
+    true,
+  );
+  assert.equal(sameSession(SESSION, { ...SESSION, rriot: { u: 'other' } }), false);
+  assert.equal(sameSession(null, SESSION), false);
 });

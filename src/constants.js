@@ -49,23 +49,38 @@ export const BATTERY_BOUNDS = { MIN: 0, MAX: 100 };
 // Must be one of the Gladys DEVICE_POLL_FREQUENCIES values, in milliseconds.
 export const POLL_FREQUENCY = 30 * 1000;
 
-// --- Xiaomi cloud + miIO -----------------------------------------------------
+// --- Roborock cloud ----------------------------------------------------------
 
-// Xiaomi account login host (region-independent). The env var override is only
-// used by the test suite (it points it at the fake server).
-export const XIAOMI_ACCOUNT_HOST = (
-  process.env.XIAOMI_ACCOUNT_HOST || 'https://account.xiaomi.com'
-).replace(/\/+$/, '');
-
-// Xiaomi Mi Home API regions, tried in turn to find the account's robots. The
-// env var override lets the test suite pin a single (fake) region.
-export const XIAOMI_REGIONS = (process.env.XIAOMI_REGIONS || 'de,us,cn,sg,ru,i2,tw')
+// Region base URLs, tried in turn. The legacy `getUrlByEmail` region-lookup
+// endpoint is deprecated (verified: it just echoes whichever host you ask, with
+// a null country), so the region is found by attempting the login on each.
+// The env var override is only used by the test suite.
+export const ROBOROCK_BASE_URLS = (
+  process.env.ROBOROCK_BASE_URLS ||
+  'https://usiot.roborock.com,https://euiot.roborock.com,https://cniot.roborock.com,https://ruiot.roborock.com'
+)
   .split(',')
-  .map((r) => r.trim())
+  .map((url) => url.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
-// miIO local (LAN) UDP port. The env var override is only used by the test suite.
-export const MIIO_PORT = Number(process.env.MIIO_PORT) || 54321;
+// AES key salt of the Roborock "1.0" key derivation.
+export const ROBOROCK_V1_SALT = 'TXdfu$jyZ#TZHsg4';
+
+// The 3-byte version header selecting the crypto family. Only "1.0" is
+// implemented: it covers the vast majority of the vacuums. A01/B01/L01 devices
+// (recent Dyad / Zeo ranges) use different schemes.
+export const ROBOROCK_PROTOCOL_VERSION = '1.0';
+
+// Roborock message protocol ids.
+export const ROBOROCK_MESSAGE_PROTOCOL = {
+  RPC_REQUEST: 101,
+  RPC_RESPONSE: 102,
+  MAP_RESPONSE: 301,
+};
+
+// Local (LAN) TCP port exposed by Roborock vacuums. The env var override is
+// only used by the test suite.
+export const ROBOROCK_LOCAL_PORT = Number(process.env.ROBOROCK_LOCAL_PORT) || 58867;
 
 // --- Roborock/miIO RPC methods -----------------------------------------------
 

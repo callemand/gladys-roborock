@@ -3,25 +3,39 @@
   "type": "device",
   "name": "Roborock",
   "description": {
-    "en": "Control your Roborock robot vacuums: state, start/stop, fan power, dock and battery.",
-    "fr": "Pilotez vos aspirateurs robots Roborock : état, marche/arrêt, aspiration, base et batterie."
+    "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery.",
+    "fr": "Aspirateurs robots de l'application Roborock : état, marche/arrêt, aspiration, base, batterie."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/callemand/gladys-roborock:1.0.0",
+  "version": "2.0.0",
+  "docker_image": "ghcr.io/callemand/gladys-roborock:2.0.0",
   "gladys_version": ">=4.62.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
   "config_schema": [
     {
-      "key": "xiaomi_account",
-      "type": "oauth2",
+      "key": "roborock_email",
+      "type": "string",
       "label": {
-        "en": "Xiaomi account",
-        "fr": "Compte Xiaomi"
+        "en": "Roborock account email",
+        "fr": "E-mail du compte Roborock"
+      },
+      "placeholder": {
+        "en": "user@example.com",
+        "fr": "utilisateur@exemple.fr"
+      },
+      "required": false
+    },
+    {
+      "key": "roborock_code",
+      "type": "string",
+      "label": {
+        "en": "Code received by email",
+        "fr": "Code reçu par e-mail"
       },
       "description": {
-        "en": "Authorize access to your Xiaomi Home account. Your robot vacuums are then detected automatically.",
-        "fr": "Autorisez l'accès à votre compte Xiaomi Home. Vos aspirateurs robots sont ensuite détectés automatiquement."
-      }
+        "en": "Leave empty on the first save: a code is sent to you, then enter it here and save again.",
+        "fr": "Laissez vide au premier enregistrement : un code vous est envoyé, saisissez-le ici puis enregistrez à nouveau."
+      },
+      "required": false
     }
   ]
 }

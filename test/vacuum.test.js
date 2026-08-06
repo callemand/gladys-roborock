@@ -9,12 +9,9 @@ import {
   VACUUM_CLEANER_STATE,
 } from '../src/constants.js';
 import { buildPollStates, buildSetCommand, buildVacuumFeatures } from '../src/devices/vacuum.js';
+import { fakeVacuumIds } from './helpers/fakeGladys.js';
 
-// A minimal external-id factory mirroring gladys.externalIds().
-const ids = {
-  device: 'ext:test:vacuum:duid',
-  feature: (code) => `ext:test:vacuum:duid:${code}`,
-};
+const ids = fakeVacuumIds('duid');
 
 test('buildVacuumFeatures exposes state, run-mode, clean-mode, dock and battery', () => {
   const features = buildVacuumFeatures(ids);

@@ -3,14 +3,9 @@ import assert from 'node:assert/strict';
 
 import { POLL_FREQUENCY } from '../src/constants.js';
 import { convertDevice, vacuumExternalIds } from '../src/devices/convertDevice.js';
+import { createFakeGladys } from './helpers/fakeGladys.js';
 
-// A minimal gladys stub exposing externalIds() with the real id scheme.
-const gladys = {
-  externalIds(type, platformId) {
-    const device = `ext:test:${type}:${platformId}`;
-    return { device, feature: (code) => `${device}:${code}` };
-  },
-};
+const gladys = createFakeGladys();
 
 test('convertDevice builds the Gladys discovered device for a robot', () => {
   const device = convertDevice(gladys, {

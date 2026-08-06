@@ -1,8 +1,13 @@
 // -----------------------------------------------------------------------------
 // Entry point of the Gladys Roborock external integration.
 //
-//   - links the Xiaomi account ONCE through a QR login (the `link_account`
-//     action), persists the session, then reconnects silently on every start;
+//   - controls the robot vacuums of a ROBOROCK app account. A robot paired in the
+//     XIAOMI HOME app answers on another cloud entirely and is served by its own
+//     integration;
+//   - links the account from the email address and the code Roborock sends back:
+//     no password, because many accounts simply have none (registered with a
+//     code, or through Google/Apple) and those that do may be guarded by two-step
+//     validation. The session is then persisted and reused silently;
 //   - publishes the account robots as discovered devices (each robot exposes
 //     state / run-mode / clean-mode / dock / battery features);
 //   - answers the polls of Gladys with the current robot status;
@@ -17,20 +22,28 @@
 
 import { GladysIntegration, logger } from '@gladysassistant/integration-sdk';
 
-import { RoborockClient } from './src/xiaomi/client.js';
 import { convertDevice, vacuumExternalIds } from './src/devices/convertDevice.js';
 import { buildPollStates, buildSetCommand } from './src/devices/vacuum.js';
-import { isSessionUsable, readSession, sessionToConfig } from './src/xiaomi/session.js';
+import {
+  clearedSessionConfig,
+  isSessionUsable,
+  readSession,
+  sameSession,
+  sessionToConfig,
+} from './src/session.js';
+import { CODE_REFUSED, RoborockAccountClient } from './src/roborock/client.js';
 
 const gladys = new GladysIntegration();
 
-// The integration has NO user-facing configuration: the Xiaomi account is
-// linked once with the `link_account` action, and the session it yields (plus
-// the region, the robots, their local keys and IPs) is discovered and
-// remembered. The session lives in off-schema config keys, so a restart never
-// needs the interactive link again.
+// The only settings: the account email, and the code Roborock emails back. The
+// robots, their local keys, their IPs and the region are all discovered. The
+// session yielded by the one-time link lives in off-schema config keys, so a
+// restart never needs the link again.
+let roborockEmail = null;
+// Single-use and transient: cleared as soon as it has served.
+let roborockCode = null;
 let session = readSession();
-let roborock = new RoborockClient(session);
+let roborock = new RoborockAccountClient(session);
 
 /**
  * Split a device external id (`ext:<selector>:vacuum:<duid>`, built with
@@ -41,22 +54,20 @@ let roborock = new RoborockClient(session);
 function parseExternalId(externalId) {
   const prefix = gladys.externalId('');
   if (!externalId || !externalId.startsWith(prefix)) {
-    throw new Error(
-      `Roborock device external_id is invalid: "${externalId}" should start with "${prefix}"`,
-    );
+    throw new Error(`Device external_id is invalid: "${externalId}" should start with "${prefix}"`);
   }
   const parts = externalId.slice(prefix.length).split(':');
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(
-      `Roborock device external_id is invalid: "${externalId}" should be "${prefix}<slug>:<duid>"`,
+      `Device external_id is invalid: "${externalId}" should be "${prefix}<slug>:<duid>"`,
     );
   }
   return { slug: parts[0], duid: parts[1] };
 }
 
 /**
- * Persist the Xiaomi session (off-schema config keys) so the next start
- * reconnects silently, without the interactive account link.
+ * Persist the session (off-schema config keys) so the next start reconnects
+ * silently, without another code.
  */
 async function persistSession() {
   const current = roborock.getSession();
@@ -67,68 +78,118 @@ async function persistSession() {
   try {
     await gladys.setConfig(sessionToConfig(current));
   } catch (err) {
-    logger.error('Could not persist the Xiaomi session', err);
+    logger.error('Could not persist the Roborock session', err);
   }
 }
 
 /**
- * Report the connection as OK. Drives the live badge of the Configuration
- * screen — the user never has to check anything by hand. No message: the green
- * badge says it all, and the robots show up in the Discovery screen.
+ * Report the connection state. Drives the live badge of the Configuration
+ * screen — the user never has to check anything by hand.
+ * @param {boolean} connected whether the account is linked
+ * @param {object} [message] a multi-language message, only when it adds something
  */
-async function reportConnected() {
+async function reportStatus(connected, message) {
   await gladys
-    .setConnectionStatus(true)
+    .setConnectionStatus(connected, message)
     .catch((err) => logger.error('Could not report the connection status', err));
 }
 
 /**
- * Report the connection as broken. A message is only worth showing when it says
- * something the red badge does not already say (a failure reason, a next step).
- * @param {object} [message] optional multi-language message shown under the badge
+ * Turn a login failure into something the user can act on, in their language.
+ * @param {Error} err the failure
+ * @returns {object} the multi-language message
  */
-async function reportDisconnected(message) {
-  await gladys
-    .setConnectionStatus(false, message)
-    .catch((err) => logger.error('Could not report the connection status', err));
+function describeFailure(err) {
+  if (err.reason === CODE_REFUSED) {
+    return {
+      en: 'That code was refused. A code can only be used once and expires quickly: clear the field, save to get a new one, then enter that one.',
+      fr: "Ce code a été refusé. Un code ne sert qu'une fois et expire vite : effacez le champ, enregistrez pour en recevoir un nouveau, puis saisissez celui-là.",
+    };
+  }
+  return {
+    en: `Connection failed: ${err.message}`,
+    fr: `Échec de la connexion : ${err.message}`,
+  };
 }
 
 /**
- * Reconnect with the linked Xiaomi account (silent passToken login). Returns
- * false (without throwing) when the account has not been linked yet.
- * @returns {Promise<boolean>} whether the connection was attempted and succeeded
+ * Ask Roborock to email a code, and tell the user where to put it.
+ * @returns {Promise<object>} the message to show
  */
-async function connectToRoborock() {
-  if (!isSessionUsable(session)) {
-    await roborock.logout();
-    logger.warn('Xiaomi account not linked yet: click Connect in the integration settings');
-    // No message: the red badge next to the account already says it, and the
-    // field description already explains what the button does.
-    await reportDisconnected();
+async function requestCode() {
+  try {
+    await roborock.requestEmailCode(roborockEmail);
+  } catch (err) {
+    logger.error('Could not ask Roborock for a code', err);
+    return {
+      en: `Roborock refused to send a code: ${err.message}`,
+      fr: `Roborock a refusé d'envoyer un code : ${err.message}`,
+    };
+  }
+  logger.info(`A code was sent to ${roborockEmail}`);
+  return {
+    en: `A code has just been sent to ${roborockEmail}: fill it in below and save again.`,
+    fr: `Un code vient d'être envoyé à ${roborockEmail} : saisissez-le ci-dessous et enregistrez à nouveau.`,
+  };
+}
+
+/**
+ * Connect the account: reuse the stored session, or link with the code the user
+ * filled in. Returns false, without throwing, when there is nothing to work with.
+ * @param {boolean} [interactive] true when the user just saved the settings
+ * @returns {Promise<boolean>} whether the account is connected
+ */
+async function connect(interactive = false) {
+  await roborock.logout();
+  const usable = isSessionUsable(session);
+  roborock = new RoborockAccountClient(usable ? session : {});
+
+  if (!usable && !roborockCode) {
+    // An email with no code is step one: ask Roborock for a code and say so.
+    // Only ever on a save, though — doing it at boot would email the user every
+    // time the container restarts.
+    if (interactive && roborockEmail) {
+      await reportStatus(false, await requestCode());
+    } else {
+      logger.info('Roborock account not linked yet: fill in your email in the settings');
+      await reportStatus(false);
+    }
     return false;
   }
-  await roborock.logout();
-  roborock = new RoborockClient(session);
+
+  let usedCode = false;
   try {
-    await roborock.login();
+    if (usable) {
+      await roborock.login();
+    } else {
+      logger.info('Linking the account with the code received by email');
+      usedCode = true;
+      await roborock.linkWithEmailCode(roborockEmail, roborockCode);
+    }
   } catch (err) {
-    await reportDisconnected({
-      en: `Connection failed: ${err.message}`,
-      fr: `Échec de la connexion : ${err.message}`,
-    });
-    throw err;
+    logger.error('Could not connect the Roborock account', err);
+    await reportStatus(false, describeFailure(err));
+    return false;
   }
   await persistSession();
-  await reportConnected();
+  if (usedCode) {
+    // single-use: leaving it in the form would have it replayed on the next save
+    // and refused, and it is of no use once the session is stored
+    roborockCode = null;
+    await gladys
+      .setConfig({ roborock_code: '' })
+      .catch((err) => logger.error('Could not clear the used code', err));
+  }
+  await reportStatus(true);
   return true;
 }
 
 /**
- * Load the robots from Roborock and publish them as discovered devices.
+ * Load the robots and publish them as discovered devices.
  */
 async function publishDevices() {
   const devices = roborock.listDevices();
-  logger.info(`${devices.length} Roborock robot(s) found`);
+  logger.info(`${devices.length} robot vacuum(s) found`);
   await gladys.publishDiscoveredDevices(devices.map((device) => convertDevice(gladys, device)));
 }
 
@@ -146,9 +207,9 @@ async function publishTransport(duid, externalId) {
 
 // --- Discovery: Gladys asks for the list of devices --------------------------
 gladys.onScanRequest(async () => {
-  logger.info('onScanRequest -> loading Roborock devices');
-  if (!roborock.isLoggedIn() && !(await connectToRoborock())) {
-    throw new Error('Roborock is not configured');
+  logger.info('onScanRequest -> loading the robots of the account');
+  if (!roborock.isLoggedIn() && !(await connect())) {
+    throw new Error('The Roborock account is not linked yet');
   }
   await publishDevices();
 });
@@ -161,9 +222,7 @@ gladys.onSetValue(async (device, feature, value) => {
 
   const command = buildSetCommand(featureCode, value);
   if (!command) {
-    throw new Error(
-      `Roborock feature "${feature.external_id}" is not controllable with value ${value}`,
-    );
+    throw new Error(`Feature "${feature.external_id}" is not controllable with value ${value}`);
   }
   await roborock.sendCommand(duid, command.method, command.params);
 });
@@ -179,89 +238,63 @@ gladys.onPoll(async (device) => {
   await publishTransport(duid, device.external_id);
 });
 
-// --- Linking the Xiaomi account ("Connect" button of the oauth2 field) -------
-// Gladys opens the URL we return in the user's browser. It is not a real OAuth2
-// provider: it is the Xiaomi QR sign-in page. The user approves it there, and we
-// learn about it through the long poll below — Xiaomi redirects to its own STS
-// endpoint, never back to Gladys, so no callback is involved.
-gladys.onOAuthAuthorizeUrl(async () => {
-  logger.info('Connect -> starting the Xiaomi sign-in');
-  const { loginUrl } = await roborock.startAccountLink();
-  // Watch for the approval in the background: the URL must be returned right
-  // away, the user needs the page open BEFORE they can approve anything.
-  waitForAccountLink().catch((err) => logger.error('Account link failed', err));
-  await reportDisconnected({
-    en: 'Sign in on the Xiaomi page that just opened. This screen updates on its own.',
-    fr: "Connectez-vous sur la page Xiaomi qui vient de s'ouvrir. Cet écran se met à jour tout seul.",
-  });
-  return loginUrl;
-});
-
-/**
- * Await the approval of a pending account link, then persist the session,
- * publish the robots and report the connection state. Long-polls until the
- * sign-in page expires.
- */
-async function waitForAccountLink() {
-  while (roborock.hasPendingAccountLink()) {
-    const linked = await roborock.pollAccountLink();
-    if (linked) {
-      logger.info('Xiaomi account linked');
-      await persistSession();
-      await publishDevices();
-      await reportConnected();
-      return;
-    }
-  }
-  logger.warn('The Xiaomi account link expired before it was approved');
-  await reportDisconnected({
-    en: 'The sign-in page expired before it was approved. Click Connect again.',
-    fr: "La page de connexion a expiré avant d'être validée. Cliquez à nouveau sur Connecter.",
-  });
-}
-
 // --- Configuration updated ----------------------------------------------------
-// Also fires for OUR OWN setConfig() when the session is persisted, so a
-// reconnection is only triggered when the session actually changed — otherwise
-// persist -> update -> reconnect -> persist would loop forever.
+// The account has no button at all: it is driven entirely by its two fields.
+// Saving the email asks for a code; saving the code links; clearing the email
+// unlinks.
+//
+// This also fires for OUR OWN setConfig() when the session is persisted, so a
+// reconnection only happens when something actually changed — otherwise
+// persist -> update -> reconnect -> persist would loop for ever.
 gladys.onConfigUpdated(async (newConfig) => {
   const updated = readSession(newConfig);
-  if (roborock.isLoggedIn() && sameSession(updated, session)) {
+  const updatedEmail = newConfig.roborock_email || null;
+  const updatedCode = newConfig.roborock_code || null;
+  const emailChanged = updatedEmail !== roborockEmail;
+  const codeChanged = updatedCode !== roborockCode;
+  const sessionChanged = !sameSession(updated, session);
+  if (!emailChanged && !codeChanged && !sessionChanged) {
     return;
   }
-  logger.info('onConfigUpdated -> reconnecting to Roborock');
+  roborockEmail = updatedEmail;
+  roborockCode = updatedCode;
   session = updated;
+  if (emailChanged || (codeChanged && updatedCode)) {
+    // Whatever was stored was obtained for the PREVIOUS email, and a code that
+    // was just filled in is meant to be used: in both cases start clean.
+    //
+    // Note the `updatedCode` guard: CLEARING a code that has served also changes
+    // it, and reconnecting there would ask Roborock for yet another code — one
+    // email per round, for ever.
+    session = {};
+  } else if (!sessionChanged) {
+    return;
+  }
+  logger.info('onConfigUpdated -> reconnecting');
   try {
-    if (await connectToRoborock()) {
-      await publishDevices();
+    await connect(true);
+    await publishDevices();
+    if (emailChanged && !roborock.isLoggedIn()) {
+      // no stale session may outlive the email that produced it
+      session = {};
+      await gladys
+        .setConfig(clearedSessionConfig())
+        .catch((err) => logger.error('Could not clear the session', err));
     }
   } catch (err) {
-    logger.error('Reconnection to Roborock failed', err);
+    logger.error('Reconnection failed', err);
   }
 });
-
-/**
- * Whether two sessions carry the same credentials.
- * @param {object} a first session
- * @param {object} b second session
- * @returns {boolean} true when equivalent
- */
-function sameSession(a, b) {
-  return (
-    Boolean(a) &&
-    Boolean(b) &&
-    a.userId === b.userId &&
-    a.passToken === b.passToken &&
-    a.deviceId === b.deviceId
-  );
-}
 
 // --- Connection lifecycle ----------------------------------------------------
 gladys.on('connected', async () => {
   logger.info('WebSocket connected to Gladys');
   try {
-    session = readSession(await gladys.getConfig());
-    if (await connectToRoborock()) {
+    const rawConfig = await gladys.getConfig();
+    roborockEmail = rawConfig.roborock_email || null;
+    roborockCode = rawConfig.roborock_code || null;
+    session = readSession(rawConfig);
+    if (await connect()) {
       await publishDevices();
     }
   } catch (err) {
