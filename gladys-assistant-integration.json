@@ -6,36 +6,86 @@
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery.",
     "fr": "Aspirateurs robots de l'application Roborock : état, marche/arrêt, aspiration, base, batterie."
   },
-  "version": "2.0.1",
-  "docker_image": "ghcr.io/callemand/gladys-roborock:2.0.1",
+  "version": "2.1.0",
+  "docker_image": "ghcr.io/callemand/gladys-roborock:2.1.0",
   "gladys_version": ">=4.62.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
   "config_schema": [
     {
-      "key": "roborock_email",
-      "type": "string",
+      "key": "roborock_account",
+      "type": "section",
       "label": {
-        "en": "Roborock account email",
-        "fr": "E-mail du compte Roborock"
-      },
-      "placeholder": {
-        "en": "user@example.com",
-        "fr": "utilisateur@exemple.fr"
-      },
-      "required": false
-    },
-    {
-      "key": "roborock_code",
-      "type": "string",
-      "label": {
-        "en": "Code received by email",
-        "fr": "Code reçu par e-mail"
+        "en": "Roborock account",
+        "fr": "Compte Roborock"
       },
       "description": {
-        "en": "Leave empty on the first save: a code is sent to you, then enter it here and save again.",
-        "fr": "Laissez vide au premier enregistrement : un code vous est envoyé, saisissez-le ici puis enregistrez à nouveau."
+        "en": "Two steps, in the Actions box below: ask for a code, then enter the code you receive. No password is ever needed.",
+        "fr": "Deux étapes, dans la boîte Actions ci-dessous : demandez un code, puis saisissez le code reçu. Aucun mot de passe n'est jamais demandé."
+      }
+    }
+  ],
+  "actions": [
+    {
+      "key": "roborock_send_code",
+      "label": {
+        "en": "Send me a code by email",
+        "fr": "M’envoyer un code par e-mail"
       },
-      "required": false
+      "description": {
+        "en": "Enter the email address of your Roborock account. It is checked before anything is sent, so a typo costs nothing.",
+        "fr": "Saisissez l'adresse e-mail de votre compte Roborock. Elle est vérifiée avant tout envoi : une faute de frappe ne coûte rien."
+      },
+      "timeout_seconds": 30,
+      "fields": [
+        {
+          "key": "email",
+          "type": "string",
+          "required": true,
+          "label": {
+            "en": "Roborock account email",
+            "fr": "E-mail du compte Roborock"
+          },
+          "placeholder": {
+            "en": "user@example.com",
+            "fr": "utilisateur@exemple.fr"
+          }
+        }
+      ]
+    },
+    {
+      "key": "roborock_link",
+      "label": {
+        "en": "Link the account with this code",
+        "fr": "Lier le compte avec ce code"
+      },
+      "description": {
+        "en": "Enter the code you just received. A code is single-use and expires quickly.",
+        "fr": "Saisissez le code que vous venez de recevoir. Un code ne sert qu'une fois et expire vite."
+      },
+      "timeout_seconds": 30,
+      "fields": [
+        {
+          "key": "code",
+          "type": "string",
+          "required": true,
+          "label": {
+            "en": "Code received by email",
+            "fr": "Code reçu par e-mail"
+          }
+        }
+      ]
+    },
+    {
+      "key": "roborock_unlink",
+      "label": {
+        "en": "Unlink the account",
+        "fr": "Délier le compte"
+      },
+      "description": {
+        "en": "Forgets the stored session; the robots are no longer discovered.",
+        "fr": "Oublie la session enregistrée ; les robots ne sont plus découverts."
+      },
+      "timeout_seconds": 30
     }
   ]
 }

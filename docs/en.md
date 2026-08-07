@@ -23,14 +23,15 @@ For every robot of your account:
 
 ## Configuration
 
-Two fields, no button:
+Two steps, in the **Actions** box:
 
-1. Fill in the **email of your Roborock account** and save. Roborock sends you a
-   code.
-2. Fill in that **code** and save again. The account is linked.
+1. Fill in the **email of your Roborock account** and click **Send me a code by
+   email**. The address is checked before anything is sent: a typo is reported
+   straight away instead of leaving you waiting for an email.
+2. Fill in the **code you receive** and click **Link the account with this code**.
 
-Clearing the email unlinks the account. The code is single-use and disappears
-from the form once it has served.
+The **Unlink the account** action forgets the session. A code is single-use and
+expires quickly: if yours is refused, ask for another one.
 
 Then open the **Discovery** screen and start a scan: your robots appear and can be
 added to Gladys.

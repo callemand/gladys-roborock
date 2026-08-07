@@ -25,14 +25,15 @@ Pour chaque robot de votre compte :
 
 ## Configuration
 
-Deux champs, aucun bouton :
+Deux étapes, dans la boîte **Actions** :
 
-1. Saisissez l'**e-mail de votre compte Roborock** et enregistrez. Roborock vous
-   envoie un code.
-2. Saisissez ce **code** et enregistrez à nouveau. Le compte est lié.
+1. Saisissez l'**e-mail de votre compte Roborock** et cliquez sur **M'envoyer un
+   code par e-mail**. L'adresse est vérifiée avant tout envoi : une faute de
+   frappe est signalée tout de suite, sans vous laisser attendre un e-mail.
+2. Saisissez le **code reçu** et cliquez sur **Lier le compte avec ce code**.
 
-Vider l'e-mail délie le compte. Le code ne sert qu'une fois et disparaît du
-formulaire dès qu'il a servi.
+L'action **Délier le compte** oublie la session. Un code ne sert qu'une fois et
+expire vite : si le vôtre est refusé, redemandez-en un.
 
 Ouvrez ensuite l'écran **Découverte** et lancez une analyse : vos robots
 apparaissent et peuvent être ajoutés à Gladys.

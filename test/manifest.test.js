@@ -22,32 +22,15 @@ const indexSource = await readFile(new URL('index.js', root), 'utf8');
 
 const fieldsByKey = new Map(manifest.config_schema.map((field) => [field.key, field]));
 
-// The settings index.js reads off the config, as `newConfig.<key>`.
-const CONFIG_KEYS_READ = ['roborock_email', 'roborock_code'];
-
-test('every setting the code reads is declared in the config_schema', () => {
-  CONFIG_KEYS_READ.forEach((key) => {
-    assert.ok(fieldsByKey.has(key), `index.js reads "${key}", which the manifest does not declare`);
-  });
-});
-
-test('every declared setting is either read by the code or presentational', () => {
+test('the form asks for nothing: everything happens through the actions', () => {
+  // The email and the code travel WITH the action that uses them, so the button
+  // can stay disabled until they are valid and there is no "did you save first?".
+  // A settings field here would be one the user fills in for nothing.
   manifest.config_schema.forEach((field) => {
-    if (field.type === 'section') {
-      return; // no value at all
-    }
-    if (field.type === 'account_link' || field.type === 'oauth2') {
-      // its value IS the Connect flow: the code must never read the key itself
-      assert.equal(
-        indexSource.includes(`.${field.key}`),
-        false,
-        `index.js must not read the value of the account field "${field.key}"`,
-      );
-      return;
-    }
-    assert.ok(
-      CONFIG_KEYS_READ.includes(field.key),
-      `the manifest declares "${field.key}", which no code reads: the user would fill it in for nothing`,
+    assert.equal(
+      field.type,
+      'section',
+      `"${field.key}" is a settings field, which this form has none of`,
     );
   });
 });
@@ -65,15 +48,19 @@ test('the session keys stay OUT of the config_schema', () => {
   });
 });
 
-test('the two fields of the account link are there, and nothing else', () => {
-  // Saving the email asks Roborock for a code; saving the code links the account.
-  // Anything more would be a setting the user has to understand for nothing.
-  assert.deepEqual(
-    manifest.config_schema.map((field) => field.key),
-    ['roborock_email', 'roborock_code'],
-  );
-  assert.equal(fieldsByKey.get('roborock_email').type, 'string');
-  assert.equal(fieldsByKey.get('roborock_code').type, 'string');
+test('the account is linked by an email then a code, and can be undone', () => {
+  const actions = new Map(manifest.actions.map((action) => [action.key, action]));
+  const email = actions.get('roborock_send_code').fields.find((f) => f.key === 'email');
+  assert.equal(email.required, true);
+  // No `format` here on purpose: released Gladys versions reject an unknown field
+  // key outright, so declaring one would make this integration impossible to
+  // install. index.js checks the address itself instead.
+  assert.equal(email.format, undefined);
+  assert.match(indexSource, /EMAIL_REGEX\.test/, 'index.js must check the address itself');
+  const code = actions.get('roborock_link').fields.find((f) => f.key === 'code');
+  assert.equal(code.required, true);
+  // and a way out, or an account linked by mistake could never be undone
+  assert.ok(actions.has('roborock_unlink'));
 });
 
 test('every manifest action has a registered handler, and vice versa', () => {

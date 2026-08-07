@@ -35,13 +35,19 @@ import { CODE_REFUSED, RoborockAccountClient } from './src/roborock/client.js';
 
 const gladys = new GladysIntegration();
 
-// The only settings: the account email, and the code Roborock emails back. The
-// robots, their local keys, their IPs and the region are all discovered. The
-// session yielded by the one-time link lives in off-schema config keys, so a
-// restart never needs the link again.
+// Nothing is configured through the form: the account is linked by the two
+// actions (ask for a code, then send it back), and the robots, their local keys,
+// their IPs and the region are all discovered. The email and the session live in
+// off-schema config keys, so a restart never needs the link again.
+const EMAIL_KEY = 'roborock_email';
+// Checked before anything is sent. Gladys has no notion of a field format, so the
+// button cannot be greyed out until the address is right — but a malformed one
+// must not cost a round trip to Roborock, nor leave the user waiting for an email
+// that was never going to arrive. Same shape as an <input type="email"> accepts:
+// one @, no whitespace, a dot in the domain. Deliberately permissive — whether
+// the address exists is Roborock's business, not ours.
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 let roborockEmail = null;
-// Single-use and transient: cleared as soon as it has served.
-let roborockCode = null;
 let session = readSession();
 let roborock = new RoborockAccountClient(session);
 
@@ -113,75 +119,45 @@ function describeFailure(err) {
 }
 
 /**
- * Ask Roborock to email a code, and tell the user where to put it.
- * @returns {Promise<object>} the message to show
- */
-async function requestCode() {
-  try {
-    await roborock.requestEmailCode(roborockEmail);
-  } catch (err) {
-    logger.error('Could not ask Roborock for a code', err);
-    return {
-      en: `Roborock refused to send a code: ${err.message}`,
-      fr: `Roborock a refusé d'envoyer un code : ${err.message}`,
-    };
-  }
-  logger.info(`A code was sent to ${roborockEmail}`);
-  return {
-    en: `A code has just been sent to ${roborockEmail}: fill it in below and save again.`,
-    fr: `Un code vient d'être envoyé à ${roborockEmail} : saisissez-le ci-dessous et enregistrez à nouveau.`,
-  };
-}
-
-/**
  * Connect the account: reuse the stored session, or link with the code the user
  * filled in. Returns false, without throwing, when there is nothing to work with.
- * @param {boolean} [interactive] true when the user just saved the settings
  * @returns {Promise<boolean>} whether the account is connected
  */
-async function connect(interactive = false) {
+async function connect() {
   await roborock.logout();
-  const usable = isSessionUsable(session);
-  roborock = new RoborockAccountClient(usable ? session : {});
-
-  if (!usable && !roborockCode) {
-    // An email with no code is step one: ask Roborock for a code and say so.
-    // Only ever on a save, though — doing it at boot would email the user every
-    // time the container restarts.
-    if (interactive && roborockEmail) {
-      await reportStatus(false, await requestCode());
-    } else {
-      logger.info('Roborock account not linked yet: fill in your email in the settings');
-      await reportStatus(false);
-    }
+  if (!isSessionUsable(session)) {
+    roborock = new RoborockAccountClient({});
+    logger.info('Account not linked yet: ask for a code from the integration settings');
+    await reportStatus(false);
     return false;
   }
-
-  let usedCode = false;
+  roborock = new RoborockAccountClient(session);
   try {
-    if (usable) {
-      await roborock.login();
-    } else {
-      logger.info('Linking the account with the code received by email');
-      usedCode = true;
-      await roborock.linkWithEmailCode(roborockEmail, roborockCode);
-    }
+    await roborock.login();
   } catch (err) {
     logger.error('Could not connect the Roborock account', err);
     await reportStatus(false, describeFailure(err));
     return false;
   }
   await persistSession();
-  if (usedCode) {
-    // single-use: leaving it in the form would have it replayed on the next save
-    // and refused, and it is of no use once the session is stored
-    roborockCode = null;
-    await gladys
-      .setConfig({ roborock_code: '' })
-      .catch((err) => logger.error('Could not clear the used code', err));
-  }
-  await reportStatus(true);
+  await reportStatus(true, linkedMessage());
   return true;
+}
+
+/**
+ * Which account is linked. The email is no longer a form field, so this is the
+ * only place the user can see it — and seeing it is how they notice they linked
+ * the wrong address.
+ * @returns {object|undefined} the multi-language message
+ */
+function linkedMessage() {
+  if (!roborockEmail) {
+    return undefined;
+  }
+  return {
+    en: `Linked account: ${roborockEmail}.`,
+    fr: `Compte lié : ${roborockEmail}.`,
+  };
 }
 
 /**
@@ -238,64 +214,97 @@ gladys.onPoll(async (device) => {
   await publishTransport(duid, device.external_id);
 });
 
-// --- Configuration updated ----------------------------------------------------
-// The account has no button at all: it is driven entirely by its two fields.
-// Saving the email asks for a code; saving the code links; clearing the email
-// unlinks.
-//
-// Only a save from the FRONTEND lands here: the config the integration writes
-// itself (the session, the used code) is not echoed back — checked in
-// externalIntegration.setIntegrationConfig, which sends no config-updated, unlike
-// saveConfigFromFront. So every event here is a deliberate user action.
-gladys.onConfigUpdated(async (newConfig) => {
-  // Captured BEFORE anything is reassigned: whether a session was stored is our
-  // own knowledge, and the payload cannot be trusted to carry it.
-  const hadStoredSession = isSessionUsable(session);
-  const updated = readSession(newConfig);
-  const updatedEmail = newConfig.roborock_email || null;
-  const updatedCode = newConfig.roborock_code || null;
-  const emailChanged = updatedEmail !== roborockEmail;
-  const codeChanged = updatedCode !== roborockCode;
-  const sessionChanged = !sameSession(updated, session);
-  roborockEmail = updatedEmail;
-  roborockCode = updatedCode;
-
-  // Saving with an email, no code and no session IS the request for a code: it is
-  // the only way this screen has to ask for one, and since a code expires fast,
-  // asking again is the normal case rather than the exception.
-  //
-  // Without this, saving an unchanged email did nothing at all — the handler
-  // returned on "nothing changed" and no code was ever sent. The flow only ever
-  // worked the very first time the email was filled in.
-  const asksForCode = Boolean(updatedEmail) && !updatedCode && !isSessionUsable(updated);
-
-  if (!emailChanged && !codeChanged && !sessionChanged && !asksForCode) {
-    return;
+// --- The two actions that link the account ------------------------------------
+// The email and the code are carried by the actions themselves, right above the
+// button that uses them: the value travels with the call, so there is no "did you
+// save first?" trap, and a malformed address is refused here — before anything is
+// sent — rather than leaving the user waiting for an email that never comes.
+gladys.onAction('roborock_send_code', async (fields) => {
+  const email = ((fields && fields.email) || '').trim();
+  if (!email) {
+    return {
+      en: 'Fill in your account email first.',
+      fr: "Renseignez d'abord l'e-mail de votre compte.",
+    };
   }
-  session = updated;
-  if (emailChanged || (codeChanged && updatedCode)) {
-    // Whatever was stored was obtained for the PREVIOUS email, and a code that
-    // was just filled in is meant to be used: in both cases start clean.
-    //
-    // Note the `updatedCode` guard: CLEARING a code that has served also changes
-    // it, and reconnecting there would ask Roborock for yet another code — one
-    // email per round, for ever.
-    session = {};
-  } else if (!sessionChanged && !asksForCode) {
-    return;
+  if (!EMAIL_REGEX.test(email)) {
+    return {
+      en: `"${email}" is not a valid email address — nothing was sent. Check it and try again.`,
+      fr: `« ${email} » n'est pas une adresse e-mail valide — rien n'a été envoyé. Corrigez-la et réessayez.`,
+    };
   }
-  logger.info('onConfigUpdated -> reconnecting');
+  roborockEmail = email;
+  // remembered off-schema: the link below, and every later re-link, needs it
+  await gladys
+    .setConfig({ [EMAIL_KEY]: email })
+    .catch((err) => logger.error('Could not remember the account email', err));
+  await roborock.requestEmailCode(email);
+  logger.info(`A code was sent to ${email}`);
+  return {
+    en: `A code has been sent to ${email}. Enter it below, then click "Link the account with this code".`,
+    fr: `Un code a été envoyé à ${email}. Saisissez-le ci-dessous, puis cliquez sur « Lier le compte avec ce code ».`,
+  };
+});
+
+gladys.onAction('roborock_link', async (fields) => {
+  const code = ((fields && fields.code) || '').trim();
+  if (!code) {
+    return { en: 'Enter the code you received.', fr: 'Saisissez le code que vous avez reçu.' };
+  }
+  if (!roborockEmail) {
+    return {
+      en: 'Ask for a code first: the address it was sent to is not known yet.',
+      fr: "Demandez d'abord un code : l'adresse à laquelle l'envoyer n'est pas encore connue.",
+    };
+  }
+  roborock = new RoborockAccountClient({});
   try {
-    await connect(true);
-    await publishDevices();
-    if (emailChanged && !roborock.isLoggedIn() && hadStoredSession) {
-      // No stale session may outlive the email that produced it. Only worth
-      // writing when something WAS stored: blanking already-blank keys would
-      // just echo back as another config update.
-      session = {};
-      await gladys
-        .setConfig(clearedSessionConfig())
-        .catch((err) => logger.error('Could not clear the session', err));
+    await roborock.linkWithEmailCode(roborockEmail, code);
+  } catch (err) {
+    logger.error('Could not link the Roborock account', err);
+    await reportStatus(false, describeFailure(err));
+    return describeFailure(err);
+  }
+  await persistSession();
+  await publishDevices();
+  await reportStatus(true, linkedMessage());
+  const count = roborock.listDevices().length;
+  return {
+    en: `Account linked, ${count} robot(s) found — open the Discovery screen to add them.`,
+    fr: `Compte lié, ${count} robot(s) trouvé(s) — ouvrez l'écran Découverte pour les ajouter.`,
+  };
+});
+
+gladys.onAction('roborock_unlink', async () => {
+  await roborock.logout();
+  roborock = new RoborockAccountClient({});
+  session = {};
+  await gladys
+    .setConfig(clearedSessionConfig())
+    .catch((err) => logger.error('Could not clear the session', err));
+  await publishDevices();
+  await reportStatus(false);
+  return {
+    en: 'The account has been unlinked. Its robots are no longer discovered.',
+    fr: 'Le compte a été délié. Ses robots ne sont plus découverts.',
+  };
+});
+
+// --- Configuration updated ----------------------------------------------------
+// Nothing on this screen is a setting any more, so the only thing that can reach
+// here is a save of the reserved GLADYS_* preferences. The session is compared
+// all the same: a config-updated is cheap to ignore, and reconnecting on one
+// would drop a working session for nothing.
+gladys.onConfigUpdated(async (newConfig) => {
+  const updated = readSession(newConfig);
+  if (sameSession(updated, session)) {
+    return;
+  }
+  logger.info('onConfigUpdated -> the stored session changed, reconnecting');
+  session = updated;
+  try {
+    if (await connect()) {
+      await publishDevices();
     }
   } catch (err) {
     logger.error('Reconnection failed', err);
@@ -307,8 +316,7 @@ gladys.on('connected', async () => {
   logger.info('WebSocket connected to Gladys');
   try {
     const rawConfig = await gladys.getConfig();
-    roborockEmail = rawConfig.roborock_email || null;
-    roborockCode = rawConfig.roborock_code || null;
+    roborockEmail = rawConfig[EMAIL_KEY] || null;
     session = readSession(rawConfig);
     if (await connect()) {
       await publishDevices();

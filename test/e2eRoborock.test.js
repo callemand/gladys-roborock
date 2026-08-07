@@ -311,8 +311,10 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
     );
     const status = gladys.state.connectionStatusPosts.at(-1);
     assert.equal(status.connected, true);
-    // One account, one badge: a message would only repeat what it already says.
-    assert.equal(status.message, undefined);
+    // The email is no longer a form field, so the status is the only place the
+    // user can see WHICH account is linked — and noticing a wrong address is
+    // exactly what they need it for.
+    assert.match(status.message.fr, new RegExp(EMAIL));
   });
 
   const pollDevice = {
@@ -418,10 +420,23 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
   });
   t.after(() => child.kill('SIGKILL'));
 
-  const save = (config) =>
+  let messageId = 0;
+  // run an action the way the Configuration screen does, and wait for its result
+  const runAction = async (key, fields) => {
+    messageId += 1;
+    const id = `action-${messageId}`;
     gladys.state.ws.send(
-      JSON.stringify({ type: 'external-integration.config-updated', payload: { config } }),
+      JSON.stringify({
+        type: 'external-integration.action.run',
+        payload: { message_id: id, key, fields },
+      }),
     );
+    await waitUntil(
+      () => gladys.state.commandResults.some((r) => r.message_id === id),
+      `result of ${key}\n${output}`,
+    );
+    return gladys.state.commandResults.find((r) => r.message_id === id);
+  };
 
   await t.test('asks for no code at boot: a restart must not email the user', async () => {
     await waitUntil(
@@ -436,59 +451,46 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     );
   });
 
-  await t.test('saving the email asks Roborock for a code, and says where to put it', async () => {
-    const before = gladys.state.connectionStatusPosts.length;
-    save({ roborock_email: OTHER_EMAIL });
-    await waitUntil(
-      () => gladys.state.connectionStatusPosts.length > before,
-      `code requested\n${output}`,
-    );
+  await t.test('a malformed address is refused without sending anything', async () => {
+    // Gladys cannot grey out the button until the address is right, so the action
+    // has to be the one that refuses — and refuse BEFORE any round trip, or the
+    // user waits for an email that was never going to arrive.
+    const before = roborock.requests.length;
+    for (const bad of ['pas-un-email', 'a@b', 'a b@c.fr', 'user@example']) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await runAction('roborock_send_code', { email: bad });
+      assert.equal(result.success, true, result.error);
+      assert.match(result.data.message.fr, /n'est pas une adresse e-mail valide/);
+    }
+    assert.equal(roborock.requests.length, before, 'Roborock was called for a malformed address');
+  });
+
+  await t.test('the first action asks Roborock for a code and remembers the address', async () => {
+    const result = await runAction('roborock_send_code', { email: OTHER_EMAIL });
+    assert.equal(result.success, true, result.error);
     assert.ok(
       roborock.requests.some((r) => r.path === '/api/v1/sendEmailCode'),
       `a code was requested\n${output}`,
     );
-    const status = gladys.state.connectionStatusPosts.at(-1);
-    assert.equal(status.connected, false);
-    assert.match(status.message.fr, /code/);
-    assert.match(status.message.fr, /saisissez-le ci-dessous/);
-  });
-
-  await t.test('saving an UNCHANGED email asks for a code again', async () => {
-    // The regression that made this whole flow unusable: the handler returned on
-    // "nothing changed", so once the email was stored, saving never asked for
-    // anything and no code ever arrived. A code expires fast, so asking again is
-    // the normal case.
-    const asked = roborock.requests.filter((r) => r.path === '/api/v1/sendEmailCode').length;
-    const before = gladys.state.connectionStatusPosts.length;
-    save({ roborock_email: OTHER_EMAIL }); // exactly what was saved a moment ago
+    assert.match(result.data.message.fr, /code a été envoyé/);
+    // remembered off-schema: the link below needs it, and so does a later re-link
     await waitUntil(
-      () => gladys.state.connectionStatusPosts.length > before,
-      `code requested again\n${output}`,
+      () => gladys.state.configPosts.some((c) => c.roborock_email === OTHER_EMAIL),
+      `email remembered\n${output}`,
     );
-    assert.ok(
-      roborock.requests.filter((r) => r.path === '/api/v1/sendEmailCode').length > asked,
-      `a second code was requested\n${output}`,
-    );
-    assert.match(gladys.state.connectionStatusPosts.at(-1).message.fr, /saisissez-le ci-dessous/);
   });
 
   await t.test('a refused code says it is single-use, not that the account is wrong', async () => {
-    const before = gladys.state.connectionStatusPosts.length;
-    save({ roborock_email: OTHER_EMAIL, roborock_code: 'stale-code' });
-    await waitUntil(
-      () => gladys.state.connectionStatusPosts.length > before,
-      `code refused\n${output}`,
-    );
-    const message = gladys.state.connectionStatusPosts.at(-1).message.fr;
-    assert.match(message, /[Cc]e code a été refusé/);
-    assert.match(message, /ne sert qu'une fois/);
-    // no English smuggled into the French
-    assert.equal(message.includes('refused.'), false);
+    const result = await runAction('roborock_link', { code: 'stale-code' });
+    assert.equal(result.success, true, result.error);
+    assert.match(result.data.message.fr, /[Cc]e code a été refusé/);
+    assert.match(result.data.message.fr, /ne sert qu'une fois/);
   });
 
   await t.test('the right code links the account and publishes the robot', async () => {
     const before = gladys.state.discoveredDevicePosts.length;
-    save({ roborock_email: OTHER_EMAIL, roborock_code: EMAIL_CODE });
+    const result = await runAction('roborock_link', { code: EMAIL_CODE });
+    assert.equal(result.success, true, result.error);
     await waitUntil(
       () => gladys.state.discoveredDevicePosts.length > before,
       `linked with the code\n${output}`,
@@ -496,9 +498,13 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     const devices = gladys.state.discoveredDevicePosts.at(-1);
     assert.equal(devices.length, 1);
     assert.equal(devices[0].external_id, `ext:${SELECTOR}:vacuum:${DUID}`);
+    // the screen says WHICH account is linked: the email is no longer a field
+    const status = gladys.state.connectionStatusPosts.at(-1);
+    assert.equal(status.connected, true);
+    assert.match(status.message.fr, new RegExp(OTHER_EMAIL));
   });
 
-  await t.test('persists the session, and clears the used code without looping', async () => {
+  await t.test('persists the session, so the next start needs no code', async () => {
     await waitUntil(
       () => gladys.state.configPosts.some((c) => c.session_roborock_token),
       `session persisted\n${output}`,
@@ -506,25 +512,12 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     const stored = gladys.state.configPosts.findLast((c) => c.session_roborock_token);
     assert.equal(stored.session_roborock_token, 'account-token');
     assert.ok(stored.session_roborock_rriot, 'the rriot credentials are persisted too');
-
-    // single-use: the code is cleared from the form, and clearing it must NOT
-    // ask Roborock for another one — that would be one email per round, for ever
-    await waitUntil(
-      () => gladys.state.configPosts.some((c) => c.roborock_code === ''),
-      `code cleared\n${output}`,
-    );
-    const asked = roborock.requests.filter((r) => r.path === '/api/v1/sendEmailCode').length;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    assert.equal(
-      roborock.requests.filter((r) => r.path === '/api/v1/sendEmailCode').length,
-      asked,
-      'clearing the used code asked Roborock for another one',
-    );
   });
 
-  await t.test('clearing the email unlinks the account', async () => {
+  await t.test('unlinking forgets the session and drops the robots', async () => {
     const before = gladys.state.configPosts.length;
-    save({ roborock_email: '' });
+    const result = await runAction('roborock_unlink', {});
+    assert.equal(result.success, true, result.error);
     await waitUntil(
       () =>
         gladys.state.configPosts
@@ -580,16 +573,20 @@ test('an account with no robot still counts as linked', async (t) => {
     );
     gladys.state.ws.send(
       JSON.stringify({
-        type: 'external-integration.config-updated',
-        payload: { config: { roborock_email: EMAIL, roborock_code: EMAIL_CODE } },
+        type: 'external-integration.action.run',
+        payload: { message_id: 'link-1', key: 'roborock_link', fields: { code: EMAIL_CODE } },
       }),
+    );
+    await waitUntil(
+      () => gladys.state.commandResults.some((r) => r.message_id === 'link-1'),
+      `link result\n${output}`,
     );
     await waitUntil(
       () => gladys.state.configPosts.some((c) => c.session_roborock_token),
       `session persisted\n${output}`,
     );
     await waitUntil(
-      () => gladys.state.connectionStatusPosts.some((s) => s.connected === true),
+      () => gladys.state.connectionStatusPosts.some((status) => status.connected === true),
       `reported connected\n${output}`,
     );
     assert.deepEqual(gladys.state.discoveredDevicePosts.at(-1), []);
