@@ -1,6 +1,6 @@
 {
   "name": "gladys-roborock",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "Gladys Assistant integration for Roborock app robot vacuums",
   "type": "module",

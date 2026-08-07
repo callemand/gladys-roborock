@@ -25,6 +25,7 @@ import { GladysIntegration, logger } from '@gladysassistant/integration-sdk';
 import { convertDevice, vacuumExternalIds } from './src/devices/convertDevice.js';
 import { buildPollStates, buildSetCommand } from './src/devices/vacuum.js';
 import {
+  SESSION_KEYS,
   clearedSessionConfig,
   isSessionUsable,
   readSession,
@@ -108,8 +109,8 @@ async function reportStatus(connected, message) {
 function describeFailure(err) {
   if (err.reason === CODE_REFUSED) {
     return {
-      en: 'That code was refused. A code can only be used once and expires quickly: clear the field, save to get a new one, then enter that one.',
-      fr: "Ce code a été refusé. Un code ne sert qu'une fois et expire vite : effacez le champ, enregistrez pour en recevoir un nouveau, puis saisissez celui-là.",
+      en: 'That code was refused. A code can only be used once and expires quickly: ask for a new one and enter that one.',
+      fr: "Ce code a été refusé. Un code ne sert qu'une fois et expire vite : demandez-en un nouveau et saisissez celui-là.",
     };
   }
   return {
@@ -126,7 +127,9 @@ function describeFailure(err) {
 async function connect() {
   await roborock.logout();
   if (!isSessionUsable(session)) {
-    roborock = new RoborockAccountClient({});
+    // The deviceId is carried over even with no session: a code already sent was
+    // issued for it, and drawing a new one here would refuse that code (2018).
+    roborock = new RoborockAccountClient({ deviceId: session.deviceId });
     logger.info('Account not linked yet: ask for a code from the integration settings');
     await reportStatus(false);
     return false;
@@ -234,9 +237,12 @@ gladys.onAction('roborock_send_code', async (fields) => {
     };
   }
   roborockEmail = email;
-  // remembered off-schema: the link below, and every later re-link, needs it
+  // Remembered off-schema, together with the deviceId: Roborock issues the code
+  // for a `header_clientid` derived from (email, deviceId), so the link step MUST
+  // present the same one or the code is refused (2018). Persisting it is what
+  // makes the two steps survive a restart of the container in between.
   await gladys
-    .setConfig({ [EMAIL_KEY]: email })
+    .setConfig({ [EMAIL_KEY]: email, [SESSION_KEYS.DEVICE_ID]: roborock.getSession().deviceId })
     .catch((err) => logger.error('Could not remember the account email', err));
   await roborock.requestEmailCode(email);
   logger.info(`A code was sent to ${email}`);
@@ -257,7 +263,9 @@ gladys.onAction('roborock_link', async (fields) => {
       fr: "Demandez d'abord un code : l'adresse à laquelle l'envoyer n'est pas encore connue.",
     };
   }
-  roborock = new RoborockAccountClient({});
+  // The client is NOT recreated here: it carries the deviceId the code was issued
+  // for. Building a fresh one drew a new random deviceId, so the code came back
+  // refused with 2018 every time — the bug this replaces.
   try {
     await roborock.linkWithEmailCode(roborockEmail, code);
   } catch (err) {

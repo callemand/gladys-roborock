@@ -6,8 +6,8 @@
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery.",
     "fr": "Aspirateurs robots de l'application Roborock : état, marche/arrêt, aspiration, base, batterie."
   },
-  "version": "2.1.0",
-  "docker_image": "ghcr.io/callemand/gladys-roborock:2.1.0",
+  "version": "2.1.1",
+  "docker_image": "ghcr.io/callemand/gladys-roborock:2.1.1",
   "gladys_version": ">=4.62.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
   "config_schema": [

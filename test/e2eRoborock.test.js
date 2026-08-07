@@ -96,7 +96,14 @@ function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
     req.on('data', () => {});
     req.on('end', () => {
       const url = new URL(req.url, 'http://localhost');
-      requests.push({ method: req.method, path: url.pathname, query: url.searchParams });
+      requests.push({
+        method: req.method,
+        path: url.pathname,
+        query: url.searchParams,
+        // Roborock derives it from (email, deviceId) and issues the code FOR it:
+        // presenting another one on the login refuses the code
+        clientId: req.headers.header_clientid,
+      });
       const base = `http://127.0.0.1:${server.address().port}`;
       res.writeHead(200, { 'Content-Type': 'application/json' });
 
@@ -110,6 +117,14 @@ function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
       } else if (url.pathname === '/api/v1/loginWithCode') {
         if (url.searchParams.get('verifycode') !== EMAIL_CODE) {
           res.end(JSON.stringify({ code: 2012, msg: 'verify code error', data: null }));
+          return;
+        }
+        // As the real API does: the code belongs to the client it was issued for.
+        // Recreating the account client between the two steps drew a new random
+        // deviceId, hence a new header_clientid, and every code came back refused.
+        const issuedTo = requests.find((r) => r.path === '/api/v1/sendEmailCode');
+        if (issuedTo && issuedTo.clientId !== req.headers.header_clientid) {
+          res.end(JSON.stringify({ code: 2018, msg: 'email code error', data: null }));
           return;
         }
         res.end(
@@ -502,6 +517,20 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     const status = gladys.state.connectionStatusPosts.at(-1);
     assert.equal(status.connected, true);
     assert.match(status.message.fr, new RegExp(OTHER_EMAIL));
+  });
+
+  await t.test('presents the same client id as the one the code was issued for', async () => {
+    // The regression this guards: the link step used to build a fresh client,
+    // drawing a new random deviceId, and Roborock answered 2018 every time.
+    const asked = roborock.requests.find((r) => r.path === '/api/v1/sendEmailCode');
+    const used = roborock.requests.findLast((r) => r.path === '/api/v1/loginWithCode');
+    assert.ok(asked && used, 'both steps reached Roborock');
+    assert.equal(used.clientId, asked.clientId);
+    // and it is persisted, so a restart between the two steps does not lose it
+    assert.ok(
+      gladys.state.configPosts.some((c) => c.session_roborock_device_id),
+      'the deviceId was persisted when the code was requested',
+    );
   });
 
   await t.test('persists the session, so the next start needs no code', async () => {
