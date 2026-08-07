@@ -453,6 +453,25 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     assert.match(status.message.fr, /saisissez-le ci-dessous/);
   });
 
+  await t.test('saving an UNCHANGED email asks for a code again', async () => {
+    // The regression that made this whole flow unusable: the handler returned on
+    // "nothing changed", so once the email was stored, saving never asked for
+    // anything and no code ever arrived. A code expires fast, so asking again is
+    // the normal case.
+    const asked = roborock.requests.filter((r) => r.path === '/api/v1/sendEmailCode').length;
+    const before = gladys.state.connectionStatusPosts.length;
+    save({ roborock_email: OTHER_EMAIL }); // exactly what was saved a moment ago
+    await waitUntil(
+      () => gladys.state.connectionStatusPosts.length > before,
+      `code requested again\n${output}`,
+    );
+    assert.ok(
+      roborock.requests.filter((r) => r.path === '/api/v1/sendEmailCode').length > asked,
+      `a second code was requested\n${output}`,
+    );
+    assert.match(gladys.state.connectionStatusPosts.at(-1).message.fr, /saisissez-le ci-dessous/);
+  });
+
   await t.test('a refused code says it is single-use, not that the account is wrong', async () => {
     const before = gladys.state.connectionStatusPosts.length;
     save({ roborock_email: OTHER_EMAIL, roborock_code: 'stale-code' });

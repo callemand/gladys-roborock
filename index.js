@@ -243,21 +243,35 @@ gladys.onPoll(async (device) => {
 // Saving the email asks for a code; saving the code links; clearing the email
 // unlinks.
 //
-// This also fires for OUR OWN setConfig() when the session is persisted, so a
-// reconnection only happens when something actually changed — otherwise
-// persist -> update -> reconnect -> persist would loop for ever.
+// Only a save from the FRONTEND lands here: the config the integration writes
+// itself (the session, the used code) is not echoed back — checked in
+// externalIntegration.setIntegrationConfig, which sends no config-updated, unlike
+// saveConfigFromFront. So every event here is a deliberate user action.
 gladys.onConfigUpdated(async (newConfig) => {
+  // Captured BEFORE anything is reassigned: whether a session was stored is our
+  // own knowledge, and the payload cannot be trusted to carry it.
+  const hadStoredSession = isSessionUsable(session);
   const updated = readSession(newConfig);
   const updatedEmail = newConfig.roborock_email || null;
   const updatedCode = newConfig.roborock_code || null;
   const emailChanged = updatedEmail !== roborockEmail;
   const codeChanged = updatedCode !== roborockCode;
   const sessionChanged = !sameSession(updated, session);
-  if (!emailChanged && !codeChanged && !sessionChanged) {
-    return;
-  }
   roborockEmail = updatedEmail;
   roborockCode = updatedCode;
+
+  // Saving with an email, no code and no session IS the request for a code: it is
+  // the only way this screen has to ask for one, and since a code expires fast,
+  // asking again is the normal case rather than the exception.
+  //
+  // Without this, saving an unchanged email did nothing at all — the handler
+  // returned on "nothing changed" and no code was ever sent. The flow only ever
+  // worked the very first time the email was filled in.
+  const asksForCode = Boolean(updatedEmail) && !updatedCode && !isSessionUsable(updated);
+
+  if (!emailChanged && !codeChanged && !sessionChanged && !asksForCode) {
+    return;
+  }
   session = updated;
   if (emailChanged || (codeChanged && updatedCode)) {
     // Whatever was stored was obtained for the PREVIOUS email, and a code that
@@ -267,15 +281,17 @@ gladys.onConfigUpdated(async (newConfig) => {
     // it, and reconnecting there would ask Roborock for yet another code — one
     // email per round, for ever.
     session = {};
-  } else if (!sessionChanged) {
+  } else if (!sessionChanged && !asksForCode) {
     return;
   }
   logger.info('onConfigUpdated -> reconnecting');
   try {
     await connect(true);
     await publishDevices();
-    if (emailChanged && !roborock.isLoggedIn()) {
-      // no stale session may outlive the email that produced it
+    if (emailChanged && !roborock.isLoggedIn() && hadStoredSession) {
+      // No stale session may outlive the email that produced it. Only worth
+      // writing when something WAS stored: blanking already-blank keys would
+      // just echo back as another config update.
       session = {};
       await gladys
         .setConfig(clearedSessionConfig())
