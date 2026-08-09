@@ -193,8 +193,21 @@ export class RoborockAccountClient {
         name: device.name || String(device.duid),
         model: product.model || null,
         online: device.online !== false,
+        routines: [],
       };
     });
+
+    await Promise.all(
+      this.devices.map(async (device) => {
+        try {
+          device.routines = await this.rest.getScenes(device.duid);
+        } catch (err) {
+          // Routine support varies by model/account. It must never prevent the
+          // robot itself from being discovered and controlled.
+          logger.warn(`Could not load routines for ${device.duid}: ${err.message}`);
+        }
+      }),
+    );
     this.localKeys = new Map();
     this.localIps = new Map();
     rawDevices.forEach((device) => {
@@ -240,6 +253,15 @@ export class RoborockAccountClient {
    */
   async sendCommand(duid, method, params = []) {
     return this.#execute(duid, method, params);
+  }
+
+  /**
+   * Execute one of the account routines. Unlike robot RPC commands, routines
+   * are cloud-side scenes and therefore always use the Roborock REST API.
+   * @param {number} routineId the routine/scene id
+   */
+  async executeRoutine(routineId) {
+    await this.rest.executeScene(routineId);
   }
 
   /**

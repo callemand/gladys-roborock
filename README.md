@@ -41,6 +41,11 @@ Each **robot** exposes these features:
 | Clean mode | `vacuum-cleaner` / `clean-mode` | miIO `fan_power` ↔ Gladys clean mode (table below) |
 | Dock       | `vacuum-cleaner` / `dock`       | "Go home" (value 1) → `app_charge`                 |
 | Battery    | `battery` / `integer`           | miIO `battery` (%), read-only, history kept        |
+| Routines   | `button` / `push`               | One button per Roborock cloud routine              |
+
+Routines keep the complete setup saved in the Roborock app, including rooms,
+zones, order, cleaning mode and number of passes. They are fetched during
+discovery and executed through the Roborock cloud API.
 
 ### Fan power ↔ clean mode
 
@@ -90,7 +95,7 @@ npm run format    # Prettier
 `test/e2eRoborock.test.js` boots the real `index.js` against a fake Gladys host
 (WebSocket + REST), a fake Roborock cloud and an in-process MQTT broker standing
 in for the robot. It exercises the code request, the link, the silent token
-login, discovery, polling and commands — including the traps that cost the most
+login, discovery, polling and commands (including cloud routines) — including the traps that cost the most
 time: a used code must be cleared without asking for another one, and an account
 with no robot must still count as linked.
 

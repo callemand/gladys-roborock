@@ -54,6 +54,6 @@ export function convertDevice(gladys, device) {
     model: device.model || null,
     poll_frequency: POLL_FREQUENCY,
     should_poll: true,
-    features: withFeatureSelectors(buildVacuumFeatures(ids)),
+    features: withFeatureSelectors(buildVacuumFeatures(ids, device.routines)),
   };
 }

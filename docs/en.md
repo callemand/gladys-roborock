@@ -20,6 +20,9 @@ For every robot of your account:
 - **Clean mode** — the suction level (silent, balanced, turbo, max, gentle).
 - **Dock** — send the robot back to its charging dock.
 - **Battery** — the current battery level, in percent.
+- **Routines** — one button per routine saved in the Roborock app. Pressing it
+  preserves its full configuration: rooms, zones, order, cleaning mode and
+  number of passes.
 
 ## Configuration
 

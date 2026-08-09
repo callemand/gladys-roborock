@@ -35,3 +35,42 @@ test('vacuumExternalIds builds the device + feature ids', () => {
   assert.equal(ids.device, 'ext:test:vacuum:duid-2');
   assert.equal(ids.feature('state'), 'ext:test:vacuum:duid-2:state');
 });
+
+test('convertDevice adds one push button per Roborock routine', () => {
+  const device = convertDevice(gladys, {
+    duid: 'duid-3',
+    name: 'Kitchen robot',
+    routines: [
+      { id: 42, name: 'After lunch' },
+      { id: 84, name: 'Kitchen and zones' },
+    ],
+  });
+
+  const routines = device.features.slice(5);
+  assert.deepEqual(
+    routines.map(({ name, external_id, category, type }) => ({
+      name,
+      external_id,
+      category,
+      type,
+    })),
+    [
+      {
+        name: 'Routine - After lunch',
+        external_id: 'ext:test:vacuum:duid-3:routine-42',
+        category: 'button',
+        type: 'push',
+      },
+      {
+        name: 'Routine - Kitchen and zones',
+        external_id: 'ext:test:vacuum:duid-3:routine-84',
+        category: 'button',
+        type: 'push',
+      },
+    ],
+  );
+  routines.forEach((feature) => {
+    assert.equal(feature.has_feedback, false);
+    assert.equal(feature.selector, feature.external_id);
+  });
+});

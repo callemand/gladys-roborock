@@ -27,6 +27,7 @@ const EMAIL = 'user@example.com';
 // a second address, so a save can change the email and trigger a code request
 const OTHER_EMAIL = 'other@example.com';
 const EMAIL_CODE = '482913';
+const ROUTINE_ID = 314;
 const RRIOT = { u: 'user-u', s: 'secret-s', h: 'hmac-h', k: 'key-k' };
 const MQTT_USERNAME = md5hex(`${RRIOT.u}:${RRIOT.k}`).slice(2, 10);
 const RESP_TOPIC = `rr/m/o/${RRIOT.u}/${MQTT_USERNAME}/${DUID}`;
@@ -176,6 +177,18 @@ function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
             },
           }),
         );
+      } else if (url.pathname === `/user/scene/device/${DUID}`) {
+        assert.match(String(req.headers.authorization), /^Hawk /);
+        res.end(
+          JSON.stringify({
+            success: true,
+            result: [{ id: ROUTINE_ID, name: 'After lunch' }],
+          }),
+        );
+      } else if (url.pathname === `/user/scene/${ROUTINE_ID}/execute`) {
+        assert.equal(req.method, 'POST');
+        assert.match(String(req.headers.authorization), /^Hawk /);
+        res.end(JSON.stringify({ success: true, result: null }));
       } else {
         res.end(JSON.stringify({ code: 200, data: {} }));
       }
@@ -307,11 +320,15 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
     assert.equal(devices[0].external_id, `ext:${SELECTOR}:vacuum:${DUID}`);
     assert.equal(devices[0].name, 'Robot cuisine');
     assert.equal(devices[0].model, 'roborock.vacuum.a70');
-    // The very same five features as on a Xiaomi account: the device layer is shared.
+    // The common vacuum features plus one cloud routine push button.
     assert.deepEqual(
       devices[0].features.map((f) => f.external_id.split(':').pop()),
-      ['state', 'run-mode', 'clean-mode', 'dock', 'battery'],
+      ['state', 'run-mode', 'clean-mode', 'dock', 'battery', `routine-${ROUTINE_ID}`],
     );
+    const routine = devices[0].features.at(-1);
+    assert.equal(routine.name, 'Routine - After lunch');
+    assert.equal(routine.category, 'button');
+    assert.equal(routine.type, 'push');
     // The IoT API was called with a Hawk signature.
     assert.ok(
       roborock.requests.some((r) => r.path === '/v3/user/homes/7'),
@@ -399,6 +416,34 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
     assert.ok(cmd, 'set_custom_mode sent');
     assert.deepEqual(cmd.params, [101]);
   });
+
+  await t.test('a routine button executes the complete Roborock cloud scene', async () => {
+    send('external-integration.device.set-value', {
+      message_id: 'set-routine',
+      device: pollDevice,
+      device_feature: {
+        external_id: `ext:${SELECTOR}:vacuum:${DUID}:routine-${ROUTINE_ID}`,
+        category: 'button',
+        type: 'push',
+      },
+      value: 1,
+    });
+    await waitUntil(
+      () => gladys.state.commandResults.some((r) => r.message_id === 'set-routine'),
+      `routine ack\n${output}`,
+    );
+    assert.equal(
+      gladys.state.commandResults.find((r) => r.message_id === 'set-routine').success,
+      true,
+    );
+    assert.ok(
+      roborock.requests.some(
+        (request) =>
+          request.method === 'POST' && request.path === `/user/scene/${ROUTINE_ID}/execute`,
+      ),
+      'execute scene sent',
+    );
+  });
 });
 
 test('a Roborock account is linked with the code Roborock emails', async (t) => {
@@ -472,7 +517,6 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     // user waits for an email that was never going to arrive.
     const before = roborock.requests.length;
     for (const bad of ['pas-un-email', 'a@b', 'a b@c.fr', 'user@example']) {
-      // eslint-disable-next-line no-await-in-loop
       const result = await runAction('roborock_send_code', { email: bad });
       assert.equal(result.success, true, result.error);
       assert.match(result.data.message.fr, /n'est pas une adresse e-mail valide/);

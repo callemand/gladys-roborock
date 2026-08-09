@@ -240,11 +240,43 @@ export class RoborockRestClient {
   }
 
   /**
+   * Fetch the routines (called scenes by the Roborock API) of a robot.
+   * @param {string} deviceId the Roborock device id
+   * @returns {Promise<Array<{id: number, name: string}>>} the routines
+   */
+  async getScenes(deviceId) {
+    this.#assertLoggedIn();
+    const path = `/user/scene/device/${encodeURIComponent(deviceId)}`;
+    const response = await this.#hawkRequest(path);
+    if (!response || response.success !== true || !Array.isArray(response.result)) {
+      throw new Error('Roborock get scenes failed: unexpected response');
+    }
+    return response.result
+      .filter((scene) => scene && scene.id !== undefined && scene.name)
+      .map((scene) => ({ id: Number(scene.id), name: String(scene.name) }))
+      .filter((scene) => Number.isSafeInteger(scene.id));
+  }
+
+  /**
+   * Execute a Roborock routine.
+   * @param {number} sceneId the Roborock scene id
+   * @returns {Promise<void>}
+   */
+  async executeScene(sceneId) {
+    this.#assertLoggedIn();
+    const path = `/user/scene/${sceneId}/execute`;
+    const response = await this.#hawkRequest(path, 'POST');
+    if (!response || response.success !== true) {
+      throw new Error('Roborock execute scene failed: unexpected response');
+    }
+  }
+
+  /**
    * Perform a GET on the IoT API, signed with a Hawk authorization header.
    * @param {string} path the request path
    * @returns {Promise<object>} the parsed JSON response
    */
-  async #hawkRequest(path) {
+  async #hawkRequest(path, method = 'GET') {
     const { rriot } = this;
     const apiBase = rriot.r.a.replace(/\/+$/, '');
     const timestamp = Math.floor(Date.now() / 1000);
@@ -255,7 +287,7 @@ export class RoborockRestClient {
     const mac = crypto.createHmac('sha256', rriot.h).update(prestr).digest('base64');
     const authorization = `Hawk id="${rriot.u}",s="${rriot.s}",ts="${timestamp}",nonce="${nonce}",mac="${mac}"`;
     return this.#fetchJson(`${apiBase}${path}`, {
-      method: 'GET',
+      method,
       headers: { Authorization: authorization },
     });
   }

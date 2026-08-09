@@ -23,7 +23,11 @@
 import { GladysIntegration, logger } from '@gladysassistant/integration-sdk';
 
 import { convertDevice, vacuumExternalIds } from './src/devices/convertDevice.js';
-import { buildPollStates, buildSetCommand } from './src/devices/vacuum.js';
+import {
+  buildPollStates,
+  buildSetCommand,
+  routineIdFromFeatureCode,
+} from './src/devices/vacuum.js';
 import {
   SESSION_KEYS,
   clearedSessionConfig,
@@ -198,6 +202,17 @@ gladys.onSetValue(async (device, feature, value) => {
   logger.info(`onSetValue <- ${feature.external_id} = ${value}`);
   const { duid } = parseExternalId(device.external_id);
   const featureCode = feature.external_id.split(':').pop();
+
+  const routineId = routineIdFromFeatureCode(featureCode);
+  if (routineId !== null) {
+    // A push button only has an actionable pressed state. Ignore its release
+    // if a client happens to send one, so a click can never run twice.
+    if (Number(value) !== 1) {
+      return;
+    }
+    await roborock.executeRoutine(routineId);
+    return;
+  }
 
   const command = buildSetCommand(featureCode, value);
   if (!command) {

@@ -22,6 +22,9 @@ Pour chaque robot de votre compte :
   turbo, max, doux).
 - **Base** — renvoyer le robot vers sa base de charge.
 - **Batterie** — le niveau de batterie actuel, en pourcentage.
+- **Routines** — un bouton par routine enregistrée dans l'application Roborock.
+  Son appui conserve toute sa personnalisation : pièces, zones, ordre, mode de
+  nettoyage et nombre de passages.
 
 ## Configuration
 

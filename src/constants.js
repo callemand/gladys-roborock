@@ -185,4 +185,5 @@ export const FEATURE_CODES = {
   CLEAN_MODE: 'clean-mode',
   DOCK: 'dock',
   BATTERY: 'battery',
+  ROUTINE_PREFIX: 'routine-',
 };

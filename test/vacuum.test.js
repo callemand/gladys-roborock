@@ -8,7 +8,12 @@ import {
   VACUUM_CLEANER_MODE,
   VACUUM_CLEANER_STATE,
 } from '../src/constants.js';
-import { buildPollStates, buildSetCommand, buildVacuumFeatures } from '../src/devices/vacuum.js';
+import {
+  buildPollStates,
+  buildSetCommand,
+  buildVacuumFeatures,
+  routineIdFromFeatureCode,
+} from '../src/devices/vacuum.js';
 import { fakeVacuumIds } from './helpers/fakeGladys.js';
 
 const ids = fakeVacuumIds('duid');
@@ -154,4 +159,11 @@ test('buildSetCommand maps dock=1 to app_charge and ignores dock=0', () => {
     params: [],
   });
   assert.equal(buildSetCommand(FEATURE_CODES.DOCK, 0), null);
+});
+
+test('routineIdFromFeatureCode accepts only valid routine feature codes', () => {
+  assert.equal(routineIdFromFeatureCode('routine-1234'), 1234);
+  assert.equal(routineIdFromFeatureCode('run-mode'), null);
+  assert.equal(routineIdFromFeatureCode('routine-nope'), null);
+  assert.equal(routineIdFromFeatureCode('routine--1'), null);
 });

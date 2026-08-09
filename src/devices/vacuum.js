@@ -33,8 +33,8 @@ import {
  *   `{ device, feature(featureKey) }`
  * @returns {Array} Gladys device features
  */
-export function buildVacuumFeatures(ids) {
-  return [
+export function buildVacuumFeatures(ids, routines = []) {
+  const features = [
     {
       name: 'State',
       external_id: ids.feature(FEATURE_CODES.STATE),
@@ -89,6 +89,35 @@ export function buildVacuumFeatures(ids) {
       type: DEVICE_FEATURE_TYPES.BATTERY.INTEGER,
     },
   ];
+
+  for (const routine of routines) {
+    features.push({
+      name: `Routine - ${routine.name}`,
+      external_id: ids.feature(`${FEATURE_CODES.ROUTINE_PREFIX}${routine.id}`),
+      read_only: false,
+      has_feedback: false,
+      keep_history: false,
+      min: 0,
+      max: 1,
+      category: DEVICE_FEATURE_CATEGORIES.BUTTON,
+      type: DEVICE_FEATURE_TYPES.BUTTON.PUSH,
+    });
+  }
+
+  return features;
+}
+
+/**
+ * Extract a Roborock scene id from a routine feature code.
+ * @param {string} featureCode the last segment of a feature external id
+ * @returns {number|null} the scene id, or null for a non-routine feature
+ */
+export function routineIdFromFeatureCode(featureCode) {
+  if (!featureCode.startsWith(FEATURE_CODES.ROUTINE_PREFIX)) {
+    return null;
+  }
+  const id = Number(featureCode.slice(FEATURE_CODES.ROUTINE_PREFIX.length));
+  return Number.isSafeInteger(id) && id >= 0 ? id : null;
 }
 
 /**
