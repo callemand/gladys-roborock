@@ -44,6 +44,13 @@ import {
   routineIdFromFeatureCode,
 } from './src/devices/vacuum.js';
 import { buildLastCleanStartState, extractLastCleanStart } from './src/devices/lastClean.js';
+import { computeSceneEvents, snapshotFromStatus } from './src/devices/sceneTriggers.js';
+import {
+  FAN_POWER_MODES,
+  SCENE_ACTIONS,
+  resolveRoomSegments,
+  resolveRoutineId,
+} from './src/devices/sceneActions.js';
 import {
   SESSION_KEYS,
   clearedSessionConfig,
@@ -56,6 +63,7 @@ import {
   CONSUMABLE_LIFETIME,
   FEATURE_CODES,
   ROBOROCK_CLEANING_STATES,
+  ROBOROCK_METHOD,
   ROBOROCK_SEGMENT_CLEANING_STATES,
   ROOM_SELECTION_NONE,
 } from './src/constants.js';
@@ -87,6 +95,38 @@ const roomCleanings = new Map();
 // Permet de remettre à zéro une ancienne sélection après un redémarrage de
 // l'intégration, sans effacer une nouvelle sélection avant son démarrage.
 const initializedRoomSelectors = new Set();
+
+// Dernier instantané (snapshot) connu par robot, pour détecter les transitions
+// qui déclenchent les scènes. La première observation ne fait qu'amorcer le
+// cache : aucun événement n'est émis au démarrage de l'intégration.
+const sceneSnapshots = new Map();
+
+/**
+ * Detect the robot transitions since the last poll and fire the matching scene
+ * triggers. Never throws: a trigger failure must not break the poll.
+ * @param {object} device the Gladys device being polled
+ * @param {string} duid the Roborock device id
+ * @param {object} status the get_status result
+ * @param {object} consumable the get_consumable result
+ * @returns {Promise<void>}
+ */
+async function publishSceneTriggers(device, duid, status, consumable) {
+  try {
+    const snapshot = snapshotFromStatus(status, consumablePercents(consumable));
+    const previous = sceneSnapshots.get(duid) || null;
+    sceneSnapshots.set(duid, snapshot);
+
+    const events = computeSceneEvents(previous, snapshot, {
+      vacuum: device.external_id,
+      deviceName: device.name || duid,
+    });
+    for (const event of events) {
+      await gladys.publishSceneEvent(event.key, event.data);
+    }
+  } catch (err) {
+    logger.warn(`Could not publish scene triggers for ${duid}: ${err.message}`);
+  }
+}
 
 /**
  * Cleaning-history cache.
@@ -424,6 +464,66 @@ gladys.onSetValue(async (device, feature, value) => {
   }
 });
 
+// --- Scene actions: a scene commands the robot -------------------------------
+// Each action carries a `vacuum` field (source: "devices"): its value is the
+// device external_id, from which the duid is parsed.
+function sceneActionDuid(fields) {
+  const vacuum = fields && fields.vacuum;
+  if (typeof vacuum !== 'string' || !vacuum) {
+    throw new Error('The "vacuum" field is required');
+  }
+  return parseExternalId(vacuum).duid;
+}
+
+gladys.onSceneAction(SCENE_ACTIONS.START_CLEANING, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_START, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.PAUSE_CLEANING, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_PAUSE, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.STOP_CLEANING, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_STOP, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.RETURN_TO_DOCK, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_CHARGE, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.SET_FAN_POWER, async (fields) => {
+  const duid = sceneActionDuid(fields);
+  const cleanMode = FAN_POWER_MODES[String(fields.mode)];
+  if (cleanMode === undefined) {
+    throw new Error(`Unknown fan power mode: "${fields.mode}"`);
+  }
+  const command = buildSetCommand(FEATURE_CODES.CLEAN_MODE, cleanMode);
+  if (!command) {
+    throw new Error(`Fan power mode "${fields.mode}" is not controllable`);
+  }
+  await roborock.sendCommand(duid, command.method, command.params);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.CLEAN_ROOMS, async (fields) => {
+  const duid = sceneActionDuid(fields);
+  const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
+  const segments = resolveRoomSegments(fields.rooms, robot?.rooms || []);
+  if (segments.length === 0) {
+    throw new Error(`No known room matched "${fields.rooms}"`);
+  }
+  await roborock.sendCommand(duid, ROBOROCK_METHOD.APP_SEGMENT_CLEAN, [{ segments }]);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.RUN_ROUTINE, async (fields) => {
+  const duid = sceneActionDuid(fields);
+  const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
+  const routineId = resolveRoutineId(fields.routine, robot?.routines || []);
+  if (routineId === null) {
+    throw new Error(`No known routine matched "${fields.routine}"`);
+  }
+  await roborock.executeRoutine(routineId);
+});
+
 // --- Polling: Gladys asks to refresh a device --------------------------------
 gladys.onPoll(async (device) => {
   const { slug, duid } = parseExternalId(device.external_id);
@@ -461,6 +561,8 @@ gladys.onPoll(async (device) => {
     if (roomSelectionFeedback) {
       states.push(roomSelectionFeedback);
     }
+
+    await publishSceneTriggers(device, duid, status, consumable);
   }
 
   if (states.length > 0) {
