@@ -1,0 +1,86 @@
+# -----------------------------------------------------------------------------
+# Isolated Gladys TEST environment for developing gladys-roborock.
+#
+#   Gladys de test  (gladys-roborock-test)
+#       │
+#       ▼
+#   gladys-roborock (dev build from ../Dockerfile)
+#       ├── TCP local ──> Roborock QV35A
+#       └── MQTT cloud ──> Roborock Cloud
+#
+# Fully separate from production:
+#   - explicit container names (…-test / …-dev)
+#   - its OWN named volume (the Roborock link survives restarts, so you never
+#     have to re-pair)
+#   - a DIFFERENT host port (1444) than production
+#
+# Run from this folder:
+#   docker compose -f docker-compose.dev.yml up -d gladys-test
+#   # install the Roborock integration inside the test Gladys UI (see README),
+#   # then, to run the LOCAL build of the integration against it:
+#   docker compose -f docker-compose.dev.yml --profile integration up -d --build
+#
+# Logs:
+#   docker compose -f docker-compose.dev.yml logs -f gladys-test
+#   docker compose -f docker-compose.dev.yml logs -f gladys-roborock-dev
+#
+# Tear down / recreate (keeps the volume unless you add -v):
+#   docker compose -f docker-compose.dev.yml down
+#   docker compose -f docker-compose.dev.yml down -v   # also wipes the link
+# -----------------------------------------------------------------------------
+
+services:
+  gladys-test:
+    # v5.1.x adds external-integration dashboard widgets (the map widget).
+    image: gladysassistant/gladys:v5.1.4
+    container_name: gladys-roborock-test
+    restart: unless-stopped
+    ports:
+      - '1444:80' # production usually uses 80/1443 — this is deliberately different
+    environment:
+      NODE_ENV: production
+      SQLITE_FILE_PATH: /var/lib/gladysassistant/gladys-production.db
+      SERVER_PORT: '80'
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - gladys_roborock_test_data:/var/lib/gladysassistant
+      # Required so Gladys can supervise external-integration containers (incl.
+      # the developer-mode local image install).
+      - /var/run/docker.sock:/var/run/docker.sock
+    # /dev/* devices are only needed by Zigbee/USB integrations — omitted here.
+
+  # Local build of the integration, pointed at the test Gladys. Behind a profile
+  # so `up` without --profile integration only starts Gladys itself. It needs the
+  # integration token the test Gladys issues when you install the integration:
+  # put it in docker/.env (see README).
+  gladys-roborock-dev:
+    profiles: ['integration']
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: gladys-roborock:dev
+    container_name: gladys-roborock-dev
+    restart: unless-stopped
+    # IMPORTANT (Synology / NAS): the DEFAULT bridge network often cannot reach a
+    # robot that sits on your LAN, which would silently force every command onto
+    # the Roborock CLOUD and defeat local-TCP testing. If local transport never
+    # engages, switch this service to the host network so it can reach the QV35A
+    # directly on port 58867:
+    #   network_mode: host
+    # (With host networking, remove any 'ports:' here and set GLADYS_HOST_API_URL
+    # to the host's address instead of the compose service name.)
+    environment:
+      GLADYS_HOST_API_URL: ${GLADYS_HOST_API_URL:-http://gladys-test:80}
+      # Set in docker/.env after creating the dev integration in the test Gladys.
+      # Empty by default so `up gladys-test` (without the integration profile) parses.
+      GLADYS_INTEGRATION_TOKEN: ${GLADYS_INTEGRATION_TOKEN:-}
+      GLADYS_INTEGRATION_SELECTOR: ${GLADYS_INTEGRATION_SELECTOR:-roborock}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    volumes:
+      - gladys_roborock_dev_data:/data
+    depends_on:
+      - gladys-test
+
+volumes:
+  gladys_roborock_test_data:
+  gladys_roborock_dev_data:

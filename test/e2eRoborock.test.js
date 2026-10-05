@@ -62,6 +62,14 @@ async function startFakeBroker() {
     let result = 'ok';
     if (inner.method === 'get_status') {
       result = [STATUS];
+    } else if (inner.method === 'get_clean_summary') {
+      result = {
+        clean_time: 60710,
+        clean_area: 932775000,
+        clean_count: 47,
+        dust_collection_count: 35,
+        records: [1786961500, 1786885623],
+      };
     } else if (inner.method === 'get_network_info') {
       // No IP: the integration stays on the cloud transport. The local TCP path
       // has its own coverage in test/roborockProtocol.test.js.
@@ -317,12 +325,13 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
     );
     const devices = gladys.state.discoveredDevicePosts.at(-1);
     assert.equal(devices.length, 1);
-    assert.equal(devices[0].external_id, `ext:${SELECTOR}:vacuum:${DUID}`);
-    assert.equal(devices[0].name, 'Robot cuisine');
-    assert.equal(devices[0].model, 'roborock.vacuum.a70');
+    const vacuum = devices[0];
+    assert.equal(vacuum.external_id, `ext:${SELECTOR}:vacuum:${DUID}`);
+    assert.equal(vacuum.name, 'Robot cuisine');
+    assert.equal(vacuum.model, 'roborock.vacuum.a70');
     // The common vacuum features plus one cloud routine push button.
     assert.deepEqual(
-      devices[0].features.map((feature) => feature.external_id.split(':').pop()),
+      vacuum.features.map((feature) => feature.external_id.split(':').pop()),
       [
         'state',
         'run-mode',
@@ -334,12 +343,27 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
         'filter',
         'sensor-cleaning',
         `routine-${ROUTINE_ID}`,
+        'last-clean-start',
       ],
     );
-    const routine = devices[0].features.at(-1);
+    const routine = vacuum.features.find((feature) =>
+      feature.external_id.endsWith(`:routine-${ROUTINE_ID}`),
+    );
+    assert.ok(routine, 'routine feature discovered');
     assert.equal(routine.name, 'Routine - After lunch');
     assert.equal(routine.category, 'button');
     assert.equal(routine.type, 'push');
+
+    const lastClean = vacuum.features.find((feature) =>
+      feature.external_id.endsWith(':last-clean-start'),
+    );
+    assert.ok(lastClean, 'last-clean-start feature discovered');
+    assert.equal(lastClean.name, 'Last clean start');
+    assert.equal(lastClean.category, 'unknown');
+    assert.equal(lastClean.type, 'unknown');
+    assert.equal(lastClean.read_only, true);
+    assert.equal(lastClean.has_feedback, true);
+    assert.equal(lastClean.keep_history, true);
     // The IoT API was called with a Hawk signature.
     assert.ok(
       roborock.requests.some((r) => r.path === '/v3/user/homes/7'),
@@ -379,10 +403,57 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
       { device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:run-mode`, state: 0 },
       { device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:clean-mode`, state: 0 },
       { device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:battery`, state: 87 },
+      {
+        device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:last-clean-start`,
+        state: 1786961500,
+      },
     ]);
     assert.ok(
       broker.commands.some((c) => c.method === 'get_status'),
       'get_status sent',
+    );
+    assert.ok(
+      broker.commands.some((c) => c.method === 'get_clean_summary'),
+      'get_clean_summary sent',
+    );
+  });
+
+  await t.test('a second unchanged poll reuses the cleaning history cache', async () => {
+    const summariesBefore = broker.commands.filter(
+      (command) => command.method === 'get_clean_summary',
+    ).length;
+
+    send('external-integration.device.poll', {
+      message_id: 'poll-2',
+      device: pollDevice,
+    });
+
+    await waitUntil(
+      () => gladys.state.commandResults.some((r) => r.message_id === 'poll-2'),
+      `second poll ack\n${output}`,
+    );
+
+    assert.equal(gladys.state.commandResults.find((r) => r.message_id === 'poll-2').success, true);
+
+    const summariesAfter = broker.commands.filter(
+      (command) => command.method === 'get_clean_summary',
+    ).length;
+
+    assert.equal(
+      summariesAfter,
+      summariesBefore,
+      'unchanged poll must not fetch cleaning history again',
+    );
+
+    assert.ok(
+      gladys.state.statePosts
+        .at(-1)
+        .some(
+          (state) =>
+            state.device_feature_external_id ===
+              `ext:${SELECTOR}:vacuum:${DUID}:last-clean-start` && state.state === 1786961500,
+        ),
+      'cached last-clean-start published',
     );
   });
 

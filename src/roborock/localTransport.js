@@ -39,6 +39,7 @@ export class RoborockLocalTransport {
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.pending = new Map(); // id -> { resolve, reject, timer }
+    this.rawWaiters = []; // one-shot waiters for non-102 frames (e.g. 301 map)
   }
 
   isConnected() {
@@ -86,15 +87,16 @@ export class RoborockLocalTransport {
    * Send an RPC command over the local connection and await its answer.
    * @param {string} method the Roborock method
    * @param {Array|object} [params] the method params
+   * @param {object} [extra] extra inner RPC keys (e.g. map `security`)
    * @returns {Promise<*>} the RPC result
    */
-  async request(method, params = []) {
+  async request(method, params = [], extra = null) {
     await this.connect();
     const id = nextRequestId();
     const timestamp = Math.floor(Date.now() / 1000);
     const message = encodeMessage({
       protocol: ROBOROCK_MESSAGE_PROTOCOL.RPC_REQUEST,
-      payload: buildRequestPayload({ id, method, params, timestamp }),
+      payload: buildRequestPayload({ id, method, params, timestamp, extra }),
       localKey: this.localKey,
       timestamp,
       prefixed: true,
@@ -116,6 +118,35 @@ export class RoborockLocalTransport {
     });
   }
 
+  /**
+   * Arm a one-shot waiter for the next non-102 frame of a given protocol (e.g.
+   * the 301 map push that follows a get_map_v1). The frame is returned with its
+   * layer-1-decrypted payload, uncorrupted, for the caller to decode/diagnose.
+   * @param {number} protocol the awaited frame protocol (e.g. 301)
+   * @param {number} [timeoutMs] how long to wait
+   * @returns {Promise<object>} the decoded frame ({ protocol, timestamp, payload, ... })
+   */
+  armRawFrame(protocol, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+      const waiter = { protocol, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.rawWaiters = this.rawWaiters.filter((w) => w !== waiter);
+        reject(new Error(`Roborock raw frame (protocol ${protocol}) timed out on ${this.duid}`));
+      }, timeoutMs);
+      this.rawWaiters.push(waiter);
+    });
+  }
+
+  #dispatchRawFrame(message) {
+    const index = this.rawWaiters.findIndex((w) => w.protocol === message.protocol);
+    if (index === -1) {
+      return;
+    }
+    const [waiter] = this.rawWaiters.splice(index, 1);
+    clearTimeout(waiter.timer);
+    waiter.resolve(message);
+  }
+
   #onData(data) {
     this.buffer = Buffer.concat([this.buffer, data]);
     let decoded;
@@ -129,6 +160,9 @@ export class RoborockLocalTransport {
     this.buffer = decoded.rest;
     decoded.messages.forEach((message) => {
       if (message.protocol !== ROBOROCK_MESSAGE_PROTOCOL.RPC_RESPONSE) {
+        // Map data and other pushes (e.g. 301): hand them to a raw-frame waiter
+        // if one is armed, otherwise drop them as before.
+        this.#dispatchRawFrame(message);
         return;
       }
       const response = parseResponsePayload(message.payload);
@@ -155,6 +189,11 @@ export class RoborockLocalTransport {
       waiter.reject(err);
     }
     this.pending.clear();
+    for (const waiter of this.rawWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(err);
+    }
+    this.rawWaiters = [];
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;

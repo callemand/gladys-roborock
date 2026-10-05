@@ -2,6 +2,9 @@ node_modules/
 npm-debug.log*
 .env
 .env.*
+!.env.example
+!docker/.env.example
 data/
+.mapdiag/
 *.log
 .DS_Store

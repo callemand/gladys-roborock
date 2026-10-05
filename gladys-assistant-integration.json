@@ -7,9 +7,9 @@
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery and routines.",
     "fr": "Aspirateurs robots de l'application Roborock : état, marche/arrêt, aspiration, base, routines."
   },
-  "version": "2.3.0",
-  "docker_image": "ghcr.io/callemand/gladys-roborock:2.3.0",
-  "gladys_version": ">=4.86.0",
+  "version": "2.3.1",
+  "docker_image": "ghcr.io/callemand/gladys-roborock:2.3.1",
+  "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
   "config_schema": [
     {
@@ -87,6 +87,162 @@
         "fr": "Oublie la session enregistrée ; les robots ne sont plus découverts."
       },
       "timeout_seconds": 30
+    }
+  ],
+  "widgets": [
+    {
+      "key": "map",
+      "label": {
+        "en": "Vacuum",
+        "fr": "Aspirateur"
+      },
+      "icon": "wind",
+      "settings": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": {
+            "en": "Vacuum",
+            "fr": "Aspirateur"
+          }
+        },
+        {
+          "key": "action1",
+          "type": "select",
+          "default": "quiet",
+          "label": {
+            "en": "Action button 3",
+            "fr": "Bouton action 3"
+          },
+          "options": [
+            {
+              "value": "none",
+              "label": {
+                "en": "None",
+                "fr": "Aucun"
+              }
+            },
+            {
+              "value": "start",
+              "label": {
+                "en": "Start",
+                "fr": "Démarrer"
+              }
+            },
+            {
+              "value": "pause",
+              "label": {
+                "en": "Pause",
+                "fr": "Pause"
+              }
+            },
+            {
+              "value": "dock",
+              "label": {
+                "en": "Dock",
+                "fr": "Retour base"
+              }
+            },
+            {
+              "value": "quiet",
+              "label": {
+                "en": "Quiet",
+                "fr": "Silencieux"
+              }
+            },
+            {
+              "value": "balanced",
+              "label": {
+                "en": "Balanced",
+                "fr": "Équilibré"
+              }
+            },
+            {
+              "value": "turbo",
+              "label": {
+                "en": "Turbo",
+                "fr": "Turbo"
+              }
+            },
+            {
+              "value": "max",
+              "label": {
+                "en": "Max",
+                "fr": "Max"
+              }
+            }
+          ]
+        },
+        {
+          "key": "action2",
+          "type": "select",
+          "default": "turbo",
+          "label": {
+            "en": "Action button 4",
+            "fr": "Bouton action 4"
+          },
+          "options": [
+            {
+              "value": "none",
+              "label": {
+                "en": "None",
+                "fr": "Aucun"
+              }
+            },
+            {
+              "value": "start",
+              "label": {
+                "en": "Start",
+                "fr": "Démarrer"
+              }
+            },
+            {
+              "value": "pause",
+              "label": {
+                "en": "Pause",
+                "fr": "Pause"
+              }
+            },
+            {
+              "value": "dock",
+              "label": {
+                "en": "Dock",
+                "fr": "Retour base"
+              }
+            },
+            {
+              "value": "quiet",
+              "label": {
+                "en": "Quiet",
+                "fr": "Silencieux"
+              }
+            },
+            {
+              "value": "balanced",
+              "label": {
+                "en": "Balanced",
+                "fr": "Équilibré"
+              }
+            },
+            {
+              "value": "turbo",
+              "label": {
+                "en": "Turbo",
+                "fr": "Turbo"
+              }
+            },
+            {
+              "value": "max",
+              "label": {
+                "en": "Max",
+                "fr": "Max"
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

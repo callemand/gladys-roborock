@@ -48,6 +48,7 @@ export class RoborockMqttTransport {
     this.password = md5hex(`${rriot.s}:${rriot.k}`).slice(16);
     this.client = null;
     this.pending = new Map(); // `${duid}:${id}` -> { resolve, reject, timer }
+    this.rawWaiters = []; // one-shot waiters for non-102 frames (e.g. 301 map)
   }
 
   publishTopic(duid) {
@@ -107,9 +108,10 @@ export class RoborockMqttTransport {
    * @param {string} duid the device id
    * @param {string} method the Roborock method
    * @param {Array|object} [params] the method params
+   * @param {object} [extra] extra inner RPC keys (e.g. map `security`)
    * @returns {Promise<*>} the RPC result
    */
-  async request(duid, method, params = []) {
+  async request(duid, method, params = [], extra = null) {
     if (!this.client || !this.client.connected) {
       await this.connect();
     }
@@ -121,7 +123,7 @@ export class RoborockMqttTransport {
     const timestamp = Math.floor(Date.now() / 1000);
     const message = encodeMessage({
       protocol: ROBOROCK_MESSAGE_PROTOCOL.RPC_REQUEST,
-      payload: buildRequestPayload({ id, method, params, timestamp }),
+      payload: buildRequestPayload({ id, method, params, timestamp, extra }),
       localKey,
       timestamp,
       prefixed: false,
@@ -145,6 +147,38 @@ export class RoborockMqttTransport {
     });
   }
 
+  /**
+   * Arm a one-shot waiter for the next non-102 frame of a device (e.g. the 301
+   * map push that follows a get_map_v1). The frame is returned with its
+   * layer-1-decrypted payload, uncorrupted, for the caller to decode/diagnose.
+   * @param {string} duid the device id
+   * @param {number} protocol the awaited frame protocol (e.g. 301)
+   * @param {number} [timeoutMs] how long to wait
+   * @returns {Promise<object>} the decoded frame ({ protocol, timestamp, payload, ... })
+   */
+  armRawFrame(duid, protocol, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+      const waiter = { duid, protocol, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.rawWaiters = this.rawWaiters.filter((w) => w !== waiter);
+        reject(new Error(`Roborock raw frame (protocol ${protocol}) timed out on ${duid}`));
+      }, timeoutMs);
+      this.rawWaiters.push(waiter);
+    });
+  }
+
+  #dispatchRawFrame(duid, message) {
+    const index = this.rawWaiters.findIndex(
+      (w) => w.duid === duid && w.protocol === message.protocol,
+    );
+    if (index === -1) {
+      return;
+    }
+    const [waiter] = this.rawWaiters.splice(index, 1);
+    clearTimeout(waiter.timer);
+    waiter.resolve(message);
+  }
+
   #onMessage(topic, message) {
     // The topic tail is the device id.
     const duid = topic.split('/').pop();
@@ -160,7 +194,10 @@ export class RoborockMqttTransport {
       return;
     }
     if (decoded.protocol !== ROBOROCK_MESSAGE_PROTOCOL.RPC_RESPONSE) {
-      return; // map data and unsolicited pushes are ignored
+      // Map data and other pushes (e.g. 301): hand them to a raw-frame waiter if
+      // one is armed, otherwise ignore them as before.
+      this.#dispatchRawFrame(duid, decoded);
+      return;
     }
     const response = parseResponsePayload(decoded.payload);
     if (!response || response.id === null) {
@@ -188,6 +225,11 @@ export class RoborockMqttTransport {
       waiter.reject(new Error('Roborock cloud transport closed'));
     }
     this.pending.clear();
+    for (const waiter of this.rawWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error('Roborock cloud transport closed'));
+    }
+    this.rawWaiters = [];
     if (this.client) {
       await new Promise((resolve) => this.client.end(true, {}, resolve));
       this.client = null;

@@ -14,7 +14,7 @@ import prettier from 'eslint-config-prettier';
 
 export default [
   {
-    ignores: ['node_modules/', 'data/'],
+    ignores: ['node_modules/', 'data/', 'src/roborock/font8x8.js'],
   },
   js.configs.recommended,
   {

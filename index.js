@@ -30,12 +30,20 @@ import {
   vacuumExternalIds,
 } from './src/devices/convertDevice.js';
 import {
+  MAP_WIDGET_KEY,
+  buildMapWidgetContent,
+  duidFromImageKey,
+  mapImageKey,
+} from './src/devices/mapWidget.js';
+import { renderMapPngBase64 } from './src/roborock/mapRender.js';
+import {
   buildConsumableStates,
   buildDockStates,
   buildPollStates,
   buildSetCommand,
   routineIdFromFeatureCode,
 } from './src/devices/vacuum.js';
+import { buildLastCleanStartState, extractLastCleanStart } from './src/devices/lastClean.js';
 import {
   SESSION_KEYS,
   clearedSessionConfig,
@@ -45,7 +53,9 @@ import {
   sessionToConfig,
 } from './src/session.js';
 import {
+  CONSUMABLE_LIFETIME,
   FEATURE_CODES,
+  ROBOROCK_CLEANING_STATES,
   ROBOROCK_SEGMENT_CLEANING_STATES,
   ROOM_SELECTION_NONE,
 } from './src/constants.js';
@@ -77,6 +87,20 @@ const roomCleanings = new Map();
 // Permet de remettre à zéro une ancienne sélection après un redémarrage de
 // l'intégration, sans effacer une nouvelle sélection avant son démarrage.
 const initializedRoomSelectors = new Set();
+
+/**
+ * Cleaning-history cache.
+ *
+ * get_clean_summary is not guaranteed to be supported locally and can therefore
+ * use the Roborock cloud. Do not execute it on every Gladys poll.
+ *
+ * The QV 35A exposes status.last_clean_t, which corresponds to the end of the
+ * latest cleaning. We use it only as a change marker: the actual feature exposed
+ * to Gladys is the cleaning START timestamp from get_clean_summary.records[0].
+ */
+const cleanHistoryCache = new Map();
+
+const CLEAN_HISTORY_REFRESH_MS = 5 * 60 * 1000;
 
 /**
  * Build the room selector feedback produced by a robot status change.
@@ -124,6 +148,79 @@ function buildRoomSelectionFeedback(duid, ids, status, hasRoomSelector) {
     device_feature_external_id: ids.feature(FEATURE_CODES.ROOM),
     text: ROOM_SELECTION_NONE,
   };
+}
+
+/**
+ * Get the latest cleaning start timestamp while limiting history RPC traffic.
+ *
+ * Verified on Roborock QV 35A (roborock.vacuum.a168):
+ *
+ *   get_clean_summary.records[0] = get_clean_record(...)[0].begin
+ *   get_status.last_clean_t       = get_clean_record(...)[0].end
+ *
+ * last_clean_t is therefore only used as a cheap change detector.
+ *
+ * On models that do not expose last_clean_t, the summary is refreshed
+ * periodically instead.
+ *
+ * @param {string} duid Roborock device id
+ * @param {object} status get_status result
+ * @returns {Promise<number|null>} Unix timestamp in seconds
+ */
+async function getLastCleanStartForPoll(duid, status) {
+  const rawLastCleanEnd = Number(status?.last_clean_t);
+  const lastCleanEnd =
+    Number.isSafeInteger(rawLastCleanEnd) && rawLastCleanEnd > 0 ? rawLastCleanEnd : null;
+
+  const now = Date.now();
+  const cached = cleanHistoryCache.get(duid);
+
+  const roborockState = Number(status?.state);
+  const isCleaning = ROBOROCK_CLEANING_STATES.has(roborockState);
+  const cleaningStarted = isCleaning && cached?.wasCleaning === false;
+
+  const markerChanged =
+    lastCleanEnd !== null &&
+    cached?.lastCleanEnd !== undefined &&
+    lastCleanEnd !== cached.lastCleanEnd;
+
+  const periodicRefreshDue = !cached || now >= (cached.nextRefreshAt || 0);
+
+  // Refresh immediately when a cleaning starts, and again when last_clean_t
+  // changes (normally when that cleaning ends). This makes Last clean start
+  // useful while a cleaning is still in progress instead of only afterwards.
+  if (!cleaningStarted && !markerChanged && !periodicRefreshDue) {
+    if (cached) {
+      cached.wasCleaning = isCleaning;
+    }
+    return cached?.lastCleanStart ?? null;
+  }
+
+  try {
+    const summary = await roborock.getCleanSummary(duid);
+    const lastCleanStart = extractLastCleanStart(summary);
+
+    cleanHistoryCache.set(duid, {
+      lastCleanEnd,
+      lastCleanStart,
+      wasCleaning: isCleaning,
+      nextRefreshAt:
+        lastCleanEnd === null ? now + CLEAN_HISTORY_REFRESH_MS : Number.POSITIVE_INFINITY,
+    });
+
+    return lastCleanStart;
+  } catch (err) {
+    logger.warn(`Could not get cleaning history for ${duid}: ${err.message}`);
+
+    cleanHistoryCache.set(duid, {
+      lastCleanEnd: cached?.lastCleanEnd ?? lastCleanEnd,
+      lastCleanStart: cached?.lastCleanStart ?? null,
+      wasCleaning: isCleaning,
+      nextRefreshAt: now + CLEAN_HISTORY_REFRESH_MS,
+    });
+
+    return cached?.lastCleanStart ?? null;
+  }
 }
 
 /**
@@ -345,6 +442,14 @@ gladys.onPoll(async (device) => {
     ]);
     const ids = vacuumExternalIds(gladys, duid);
     states = [...buildPollStates(ids, status), ...buildConsumableStates(ids, consumable)];
+
+    const lastCleanStart = await getLastCleanStartForPoll(duid, status);
+    const lastCleanState = buildLastCleanStartState(ids, lastCleanStart);
+
+    if (lastCleanState) {
+      states.push(lastCleanState);
+    }
+
     const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
     const roomSelectionFeedback = buildRoomSelectionFeedback(
       duid,
@@ -362,6 +467,97 @@ gladys.onPoll(async (device) => {
     await gladys.publishStates(states);
   }
   await publishTransport(duid, device.external_id);
+});
+
+// --- Map dashboard widget ----------------------------------------------------
+// The map is exposed as a dashboard widget (SDK >= 0.14), not a device: Gladys
+// pulls the content (onWidgetGet) and the image bytes (onWidgetGetImage). A small
+// cache holds the last rendered PNG per image key so the two calls of one refresh
+// do not fetch the map twice; on a cold cache the duid is recovered from the key.
+const MAP_IMAGE_CACHE_MAX = 8;
+const mapImageCache = new Map(); // imageKey -> PNG base64
+
+function cacheMapImage(key, base64) {
+  mapImageCache.set(key, base64);
+  while (mapImageCache.size > MAP_IMAGE_CACHE_MAX) {
+    mapImageCache.delete(mapImageCache.keys().next().value);
+  }
+}
+
+async function renderMapForDuid(duid) {
+  if (!roborock.isLoggedIn() && !(await connect())) {
+    throw new Error('The Roborock account is not linked yet');
+  }
+  const map = await roborock.getMap(duid, { includePixels: true });
+  return { map, base64: renderMapPngBase64(map) };
+}
+
+/**
+ * Remaining life as a percentage from a used-seconds counter and its lifetime.
+ * @param {number} used seconds of wear
+ * @param {number} lifetime total lifetime in seconds
+ * @returns {number|null} 0-100, or null when unknown
+ */
+function remaining(used, lifetime) {
+  if (!Number.isFinite(Number(used))) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, 100 - (Number(used) / lifetime) * 100));
+}
+
+/**
+ * Remaining life of every tracked consumable, in percent.
+ * @param {object} c the get_consumable result
+ * @returns {object} { mainBrush, sideBrush, filter, sensor }
+ */
+function consumablePercents(c) {
+  const v = c || {};
+  return {
+    mainBrush: remaining(v.main_brush_work_time, CONSUMABLE_LIFETIME.MAIN_BRUSH_SECONDS),
+    sideBrush: remaining(v.side_brush_work_time, CONSUMABLE_LIFETIME.SIDE_BRUSH_SECONDS),
+    filter: remaining(v.filter_work_time, CONSUMABLE_LIFETIME.FILTER_SECONDS),
+    sensor: remaining(v.sensor_dirty_time, CONSUMABLE_LIFETIME.SENSOR_SECONDS),
+  };
+}
+
+gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
+  const vacuumExternalId = settings && settings.vacuum;
+  if (!vacuumExternalId) {
+    throw new Error('No vacuum selected for the map widget');
+  }
+  const { duid } = parseExternalId(vacuumExternalId);
+  logger.info(`onWidgetGet(map) <- ${duid}`);
+  const { map, base64 } = await renderMapForDuid(duid);
+  const imageKey = mapImageKey(duid, map.mapSequence);
+  cacheMapImage(imageKey, base64);
+  // The map image is ready; gather the live numbers for the tiles / status block.
+  const [status, consumables] = await Promise.all([
+    roborock.getStatus(duid).catch((err) => {
+      logger.warn(`Widget: could not get status for ${duid}: ${err.message}`);
+      return {};
+    }),
+    roborock
+      .getConsumable(duid)
+      .then((c) => consumablePercents(c))
+      .catch(() => ({})),
+  ]);
+  await publishTransport(duid, vacuumExternalId);
+  return buildMapWidgetContent(map, { imageKey, vacuumExternalId, status, consumables, settings });
+});
+
+gladys.onWidgetGetImage(async (imageKey) => {
+  const cached = mapImageCache.get(imageKey);
+  if (cached) {
+    return cached;
+  }
+  const duid = duidFromImageKey(imageKey);
+  if (!duid) {
+    throw new Error(`Unknown map image key: ${imageKey}`);
+  }
+  logger.info(`onWidgetGetImage <- re-rendering ${duid} (cache miss)`);
+  const { base64 } = await renderMapForDuid(duid);
+  cacheMapImage(imageKey, base64);
+  return base64;
 });
 
 // --- The two actions that link the account ------------------------------------
@@ -489,6 +685,21 @@ gladys.on('disconnected', () => {
 gladys.handleShutdown(async (signal) => {
   logger.info(`Received ${signal} -> graceful shutdown`);
   await roborock.logout();
+});
+
+// --- Resilience --------------------------------------------------------------
+// A long-running integration must never die on a stray async error (e.g. a local
+// transport socket rejected a pending request as it was torn down during a cloud
+// fallback). Log and keep running: the SDK reconnects, and the next poll / widget
+// pull succeeds over the cloud. Without this, an unhandled rejection exits the
+// process and Gladys shows the integration as degraded.
+process.on('unhandledRejection', (reason) => {
+  logger.warn(
+    `Unhandled promise rejection (ignored): ${reason && reason.message ? reason.message : reason}`,
+  );
+});
+process.on('uncaughtException', (err) => {
+  logger.error(`Uncaught exception (ignored): ${err && err.message ? err.message : err}`);
 });
 
 // --- Startup -----------------------------------------------------------------

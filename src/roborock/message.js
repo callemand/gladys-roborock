@@ -20,7 +20,7 @@
 // -----------------------------------------------------------------------------
 
 import { ROBOROCK_MESSAGE_PROTOCOL, ROBOROCK_PROTOCOL_VERSION } from '../constants.js';
-import { crc32, decrypt, encrypt } from './crypto.js';
+import { crc32, decrypt, decryptNoPad, encrypt } from './crypto.js';
 
 const HEADER_SIZE = 3 + 4 + 4 + 4 + 2 + 2; // 19 bytes, up to and including payloadLen
 
@@ -72,6 +72,8 @@ function uint32be(value) {
  * @param {string} params.method the Roborock method (e.g. "get_status")
  * @param {Array|object} [params.params] the method params
  * @param {number} [params.timestamp] unix timestamp in seconds
+ * @param {object} [params.extra] extra top-level keys merged into the inner RPC
+ *   object (e.g. `{ security: { endpoint, nonce } }` required by get_map_v1)
  * @returns {Buffer} the clear payload bytes
  */
 export function buildRequestPayload({
@@ -79,8 +81,9 @@ export function buildRequestPayload({
   method,
   params = [],
   timestamp = Math.floor(Date.now() / 1000),
+  extra = null,
 }) {
-  const inner = JSON.stringify({ id, method, params });
+  const inner = JSON.stringify({ id, method, params, ...(extra || {}) });
   return Buffer.from(JSON.stringify({ dps: { 101: inner }, t: timestamp }));
 }
 
@@ -172,9 +175,26 @@ export function decodeMessage(data, localKey) {
 
   const encrypted = data.subarray(HEADER_SIZE, HEADER_SIZE + payloadLen);
   // The key depends on the timestamp of THIS message, not on ours.
-  const payload = payloadLen > 0 ? decrypt(encrypted, timestamp, localKey) : Buffer.alloc(0);
+  let payload = Buffer.alloc(0);
+  let decryptError = null;
+  if (payloadLen > 0) {
+    try {
+      payload = decrypt(encrypted, timestamp, localKey);
+    } catch (err) {
+      // A map (301) frame is padded like any other, so this is not expected —
+      // but if a frame ever fails PKCS7 unpadding, fall back to the raw blocks
+      // instead of throwing: throwing here wipes the whole stream buffer and
+      // loses the capture. The error is surfaced for diagnosis.
+      decryptError = err;
+      try {
+        payload = decryptNoPad(encrypted, timestamp, localKey);
+      } catch {
+        payload = encrypted;
+      }
+    }
+  }
 
-  return { version, seq, random, timestamp, protocol, payload };
+  return { version, seq, random, timestamp, protocol, payload, decryptError };
 }
 
 /**
