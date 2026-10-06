@@ -12,6 +12,8 @@
 // duid can be recovered when the core asks for an image after a restart.
 // -----------------------------------------------------------------------------
 
+import { createHash } from 'node:crypto';
+
 import { WIDGET_COLORS } from '@gladysassistant/integration-sdk';
 
 import { FEATURE_CODES, VACUUM_CLEANER_CLEAN_MODE, VACUUM_CLEANER_MODE } from '../constants.js';
@@ -23,16 +25,29 @@ export const MAP_WIDGET_KEY = 'map';
 // sequence has not changed. The widget CONTENT is re-pulled on its own ttl.
 export const MAP_RENDER_VERSION = 7;
 
+// The core caps an image key at 64 characters (`^[a-z0-9][a-z0-9-]{0,63}$`). The
+// hex form `map-<hex(duid)>-<seq>-r<ver>` is reversible and survives a restart,
+// but hex doubles the duid length, so for a long duid the key would overflow. In
+// that case we fall back to a short hash and keep the duid in this registry for
+// the reverse lookup (onWidgetGetImage), with the hex decode as the primary path.
+const duidByHashedKey = new Map();
+
 /**
- * Build the per-map image key (`map-<hex(duid)>-<sequence>-r<render version>`),
- * matching the core key grammar `^[a-z0-9][a-z0-9-]{0,63}$`.
+ * Build the per-map image key, matching the core grammar `^[a-z0-9][a-z0-9-]{0,63}$`.
  * @param {string} duid the Roborock device id
  * @param {number} sequence the RRMap map sequence (change marker)
  * @returns {string} the image key
  */
 export function mapImageKey(duid, sequence) {
-  const hex = Buffer.from(String(duid)).toString('hex');
-  return `map-${hex}-${Number(sequence) || 0}-r${MAP_RENDER_VERSION}`;
+  const seq = Number(sequence) || 0;
+  const hexKey = `map-${Buffer.from(String(duid)).toString('hex')}-${seq}-r${MAP_RENDER_VERSION}`;
+  if (hexKey.length <= 64) {
+    return hexKey;
+  }
+  const short = createHash('sha1').update(String(duid)).digest('hex').slice(0, 16);
+  const hashedKey = `maph-${short}-${seq}-r${MAP_RENDER_VERSION}`;
+  duidByHashedKey.set(hashedKey, String(duid));
+  return hashedKey;
 }
 
 /**
@@ -42,14 +57,14 @@ export function mapImageKey(duid, sequence) {
  */
 export function duidFromImageKey(key) {
   const match = /^map-([0-9a-f]+)-\d+(?:-r\d+)?$/.exec(String(key || ''));
-  if (!match) {
-    return null;
+  if (match) {
+    try {
+      return Buffer.from(match[1], 'hex').toString('utf8');
+    } catch {
+      return null;
+    }
   }
-  try {
-    return Buffer.from(match[1], 'hex').toString('utf8');
-  } catch {
-    return null;
-  }
+  return duidByHashedKey.get(String(key || '')) || null;
 }
 
 // Catalogue of the actions the user can bind to the two configurable buttons.
@@ -62,9 +77,12 @@ export const WIDGET_ACTIONS = {
     feature: FEATURE_CODES.RUN_MODE,
     value: VACUUM_CLEANER_MODE.CLEANING,
   },
-  pause: {
-    label: { en: 'Pause', fr: 'Pause' },
-    icon: 'pause',
+  stop: {
+    // RUN_MODE + IDLE maps to app_stop (not app_pause): this ends the cycle, it
+    // does not pause it, so the button is labelled accordingly. A true pause is
+    // available as the `pause_cleaning` scene action.
+    label: { en: 'Stop', fr: 'Arrêter' },
+    icon: 'square',
     feature: FEATURE_CODES.RUN_MODE,
     value: VACUUM_CLEANER_MODE.IDLE,
   },
@@ -263,7 +281,10 @@ export function buildMapWidgetContent(
           color: WIDGET_COLORS.INFO,
         },
         {
-          label: { en: 'Last cleaning', fr: 'Dernier nettoyage' },
+          // status.last_clean_t is the END of the last cleaning; the dedicated
+          // "last-clean-start" device feature exposes the START. Label the end
+          // explicitly so the two are not read as the same instant.
+          label: { en: 'Last cleaning (end)', fr: 'Fin du dernier nettoyage' },
           value: formatCleanTimestamp(Number(status.last_clean_t), now),
           color: WIDGET_COLORS.NEUTRAL,
         },

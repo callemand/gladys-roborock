@@ -12,6 +12,13 @@ const CTX = { vacuum: 'ext:test:vacuum:duid-1', deviceName: 'Robot cuisine' };
 
 // Helper: build a snapshot from a partial status + consumable percentages.
 const snap = (status, percents = {}) => snapshotFromStatus(status, percents);
+// Same, but flagged as belonging to an already-active cleaning session (what a
+// previous computeSceneEvents call would have stored).
+const active = (status, percents = {}) => {
+  const snapshot = snap(status, percents);
+  snapshot.sessionActive = true;
+  return snapshot;
+};
 
 const keys = (events) => events.map((e) => e.key);
 const find = (events, key) => events.find((e) => e.key === key);
@@ -32,7 +39,7 @@ test('cleaning_started fires on the idle -> cleaning transition', () => {
 });
 
 test('cleaning_finished exposes duration and area, and docking fires returned_to_dock', () => {
-  const previous = snap({ state: 5, battery: 70, clean_time: 1800, clean_area: 40_000_000 });
+  const previous = active({ state: 5, battery: 70, clean_time: 1800, clean_area: 40_000_000 });
   const current = snap({ state: 8, battery: 70 }); // back on the dock
   const events = computeSceneEvents(previous, current, CTX);
   assert.ok(keys(events).includes(SCENE_TRIGGERS.CLEANING_FINISHED));
@@ -40,6 +47,23 @@ test('cleaning_finished exposes duration and area, and docking fires returned_to
   const finished = find(events, SCENE_TRIGGERS.CLEANING_FINISHED);
   assert.equal(finished.data.duration_min, 30);
   assert.equal(finished.data.area_m2, 40);
+  assert.equal(current.sessionActive, false);
+});
+
+test('pausing mid-clean does not finish the session', () => {
+  const previous = active({ state: 5, battery: 70 }); // cleaning
+  const current = snap({ state: 10, battery: 70 }); // paused
+  const events = computeSceneEvents(previous, current, CTX);
+  assert.equal(find(events, SCENE_TRIGGERS.CLEANING_FINISHED), undefined);
+  assert.equal(current.sessionActive, true);
+});
+
+test('resuming from pause does not fire cleaning_started again', () => {
+  const previous = active({ state: 10, battery: 70 }); // paused, session still active
+  const current = snap({ state: 5, battery: 69 }); // cleaning again
+  const events = computeSceneEvents(previous, current, CTX);
+  assert.equal(find(events, SCENE_TRIGGERS.CLEANING_STARTED), undefined);
+  assert.equal(current.sessionActive, true);
 });
 
 test('battery_low fires once when crossing the 20% threshold downward', () => {

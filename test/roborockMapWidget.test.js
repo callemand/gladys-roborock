@@ -29,6 +29,14 @@ test('mapImageKey changes with the map sequence', () => {
   assert.notEqual(mapImageKey(DUID, 4), mapImageKey(DUID, 5));
 });
 
+test('mapImageKey stays within the 64-char core limit and still round-trips a long duid', () => {
+  const longDuid = 'D'.repeat(48); // hex form would overflow 64 chars
+  const key = mapImageKey(longDuid, 7);
+  assert.ok(key.length <= 64, `key is ${key.length} chars`);
+  assert.match(key, /^[a-z0-9][a-z0-9-]{0,63}$/);
+  assert.equal(duidFromImageKey(key), longDuid);
+});
+
 test('duidFromImageKey rejects a foreign key', () => {
   assert.equal(duidFromImageKey('something-else'), null);
   assert.equal(duidFromImageKey('map-zzzz-1'), null); // not valid hex
@@ -53,7 +61,7 @@ test('buildMapWidgetContent is accepted by the core validator', () => {
     vacuumExternalId: v,
     status: { state: 8, battery: 82, clean_area: 43_000_000, clean_time: 2280, last_clean_t: 1 },
     consumables: { filter: 72, mainBrush: 50, sideBrush: 20, sensor: 5 },
-    settings: { action1: 'quiet', action2: 'pause' },
+    settings: { action1: 'quiet', action2: 'stop' },
     now: Date.UTC(2026, 0, 2),
   });
 

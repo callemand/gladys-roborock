@@ -41,6 +41,7 @@ import {
   buildDockStates,
   buildPollStates,
   buildSetCommand,
+  consumablePercents,
   routineIdFromFeatureCode,
 } from './src/devices/vacuum.js';
 import { buildLastCleanStartState, extractLastCleanStart } from './src/devices/lastClean.js';
@@ -60,7 +61,6 @@ import {
   sessionToConfig,
 } from './src/session.js';
 import {
-  CONSUMABLE_LIFETIME,
   FEATURE_CODES,
   ROBOROCK_CLEANING_STATES,
   ROBOROCK_METHOD,
@@ -252,8 +252,12 @@ async function getLastCleanStartForPoll(duid, status) {
   } catch (err) {
     logger.warn(`Could not get cleaning history for ${duid}: ${err.message}`);
 
+    // Store the CURRENT lastCleanEnd (not the stale cached one) so a model that
+    // does not support get_clean_summary — or an unreachable cloud — does not
+    // keep `markerChanged` true and retry the (possibly 15s-timeout) call on
+    // every 30s poll. The periodic refresh (nextRefreshAt) still applies.
     cleanHistoryCache.set(duid, {
-      lastCleanEnd: cached?.lastCleanEnd ?? lastCleanEnd,
+      lastCleanEnd,
       lastCleanStart: cached?.lastCleanStart ?? null,
       wasCleaning: isCleaning,
       nextRefreshAt: now + CLEAN_HISTORY_REFRESH_MS,
@@ -586,40 +590,40 @@ function cacheMapImage(key, base64) {
   }
 }
 
+// Short-lived parsed-map + PNG cache per robot, with in-flight de-duplication.
+// Without it every dashboard refresh (content ttl) and every image cache-miss
+// would fire a fresh get_map_v1 (up to 10s local + 10s cloud) plus a synchronous
+// PNG render, and concurrent viewers of the same robot would arm overlapping 301
+// waiters (AES "bad decrypt"). A single in-flight request is shared, and its
+// result is reused for a short window.
+const MAP_RENDER_TTL_MS = 60 * 1000;
+const mapRenderCache = new Map(); // duid -> { at, map, base64 }
+const mapRenderInFlight = new Map(); // duid -> Promise<{ map, base64 }>
+
 async function renderMapForDuid(duid) {
-  if (!roborock.isLoggedIn() && !(await connect())) {
-    throw new Error('The Roborock account is not linked yet');
+  const cached = mapRenderCache.get(duid);
+  if (cached && Date.now() - cached.at < MAP_RENDER_TTL_MS) {
+    return cached;
   }
-  const map = await roborock.getMap(duid, { includePixels: true });
-  return { map, base64: renderMapPngBase64(map) };
-}
-
-/**
- * Remaining life as a percentage from a used-seconds counter and its lifetime.
- * @param {number} used seconds of wear
- * @param {number} lifetime total lifetime in seconds
- * @returns {number|null} 0-100, or null when unknown
- */
-function remaining(used, lifetime) {
-  if (!Number.isFinite(Number(used))) {
-    return null;
+  const pending = mapRenderInFlight.get(duid);
+  if (pending) {
+    return pending;
   }
-  return Math.max(0, Math.min(100, 100 - (Number(used) / lifetime) * 100));
-}
-
-/**
- * Remaining life of every tracked consumable, in percent.
- * @param {object} c the get_consumable result
- * @returns {object} { mainBrush, sideBrush, filter, sensor }
- */
-function consumablePercents(c) {
-  const v = c || {};
-  return {
-    mainBrush: remaining(v.main_brush_work_time, CONSUMABLE_LIFETIME.MAIN_BRUSH_SECONDS),
-    sideBrush: remaining(v.side_brush_work_time, CONSUMABLE_LIFETIME.SIDE_BRUSH_SECONDS),
-    filter: remaining(v.filter_work_time, CONSUMABLE_LIFETIME.FILTER_SECONDS),
-    sensor: remaining(v.sensor_dirty_time, CONSUMABLE_LIFETIME.SENSOR_SECONDS),
-  };
+  const promise = (async () => {
+    if (!roborock.isLoggedIn() && !(await connect())) {
+      throw new Error('The Roborock account is not linked yet');
+    }
+    const map = await roborock.getMap(duid, { includePixels: true });
+    const entry = { at: Date.now(), map, base64: renderMapPngBase64(map) };
+    mapRenderCache.set(duid, entry);
+    return entry;
+  })();
+  mapRenderInFlight.set(duid, promise);
+  try {
+    return await promise;
+  } finally {
+    mapRenderInFlight.delete(duid);
+  }
 }
 
 gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
@@ -790,18 +794,14 @@ gladys.handleShutdown(async (signal) => {
 });
 
 // --- Resilience --------------------------------------------------------------
-// A long-running integration must never die on a stray async error (e.g. a local
-// transport socket rejected a pending request as it was torn down during a cloud
-// fallback). Log and keep running: the SDK reconnects, and the next poll / widget
-// pull succeeds over the cloud. Without this, an unhandled rejection exits the
-// process and Gladys shows the integration as degraded.
-process.on('unhandledRejection', (reason) => {
-  logger.warn(
-    `Unhandled promise rejection (ignored): ${reason && reason.message ? reason.message : reason}`,
-  );
-});
+// Log an uncaught exception, then let the process exit so Gladys restarts the
+// container in a clean state rather than leaving it running undefined. Unhandled
+// rejections are deliberately NOT swallowed: the known source (the 301 waiter)
+// is handled at its await site, and masking the rest would hide real bugs while
+// the integration silently stops publishing.
 process.on('uncaughtException', (err) => {
-  logger.error(`Uncaught exception (ignored): ${err && err.message ? err.message : err}`);
+  logger.error(`Uncaught exception, exiting: ${err && err.message ? err.message : err}`);
+  process.exit(1);
 });
 
 // --- Startup -----------------------------------------------------------------

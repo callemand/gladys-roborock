@@ -113,10 +113,34 @@ export function snapshotFromStatus(status = {}, percents = {}) {
 }
 
 /**
+ * Whether a cleaning session is still ongoing in the current snapshot.
+ *
+ * A session starts when the robot cleans and spans the non-cleaning states that
+ * are part of the same job — paused, returning to the dock, mid-job recharge and
+ * error (stuck mid-clean). It ends only once the robot is genuinely idle at the
+ * dock. This keeps a pause/resume (or a mop wash on the way home) from reading as
+ * a finished-then-restarted cleaning.
+ * @param {boolean} previousActive whether a session was active at the last poll
+ * @param {object} snapshot the current snapshot
+ * @returns {boolean} whether a session is active now
+ */
+function nextSessionActive(previousActive, snapshot) {
+  if (snapshot.cleaning) {
+    return true;
+  }
+  const continues =
+    snapshot.gladysState === VACUUM_CLEANER_STATE.PAUSED ||
+    snapshot.gladysState === VACUUM_CLEANER_STATE.RETURNING_TO_DOCK ||
+    snapshot.gladysState === VACUUM_CLEANER_STATE.ERROR;
+  return previousActive && continues;
+}
+
+/**
  * Compare two snapshots and return the scene events for every transition.
- * A null `previous` only seeds the cache (no event on the first poll).
+ * A null `previous` only seeds the cache (no event on the first poll). The
+ * current snapshot is tagged with `sessionActive` so the caller can store it.
  * @param {object|null} previous the previous snapshot
- * @param {object} current the current snapshot
+ * @param {object} current the current snapshot (mutated: `sessionActive` is set)
  * @param {object} ctx context
  * @param {string} ctx.vacuum the vacuum device external_id (the `vacuum` filter)
  * @param {string} ctx.deviceName the robot name (the `device_name` variable)
@@ -124,22 +148,26 @@ export function snapshotFromStatus(status = {}, percents = {}) {
  */
 export function computeSceneEvents(previous, current, { vacuum, deviceName }) {
   const events = [];
+  const previousActive = previous ? Boolean(previous.sessionActive) : false;
+  current.sessionActive = nextSessionActive(previousActive, current);
   if (!previous) {
     return events;
   }
   const base = { vacuum, device_name: deviceName };
 
-  if (current.cleaning && !previous.cleaning) {
+  // A new session begins (not a resume from pause / returning / error).
+  if (current.cleaning && !previousActive) {
     events.push({ key: SCENE_TRIGGERS.CLEANING_STARTED, data: { ...base } });
   }
 
-  if (!current.cleaning && previous.cleaning) {
+  // The session ended: the robot returned to the dock for good.
+  if (previousActive && !current.sessionActive) {
     events.push({
       key: SCENE_TRIGGERS.CLEANING_FINISHED,
       data: {
         ...base,
-        duration_min: Math.round((previous.cleanTimeSec || current.cleanTimeSec) / 60),
-        area_m2: Math.round((previous.cleanAreaMm2 || current.cleanAreaMm2) / 1e6),
+        duration_min: Math.round((current.cleanTimeSec || previous.cleanTimeSec) / 60),
+        area_m2: Math.round((current.cleanAreaMm2 || previous.cleanAreaMm2) / 1e6),
       },
     });
   }

@@ -382,6 +382,11 @@ export class RoborockAccountClient {
   async #fetchMapOnce(duid, security, transport, { arm, send }) {
     // Arm the 301 waiter BEFORE sending, so a fast push cannot be missed.
     const framePromise = arm();
+    // Mark the promise as handled right away: it is only awaited AFTER `send()`
+    // resolves, so a waiter timeout (or #onClose rejecting the rawWaiters) while
+    // the 102 ack is still pending would otherwise be an unhandledRejection and
+    // crash the process. The rejection is still delivered to the `await` below.
+    framePromise.catch(() => {});
     let ack = null;
     let ackError = null;
     try {

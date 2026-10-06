@@ -186,6 +186,14 @@ export function decodeMessage(data, localKey) {
       // instead of throwing: throwing here wipes the whole stream buffer and
       // loses the capture. The error is surfaced for diagnosis.
       decryptError = err;
+      // The map (301) frame is the only one kept on a PKCS7 failure: falling
+      // back to the raw blocks preserves the capture for analysis. For every
+      // other protocol (e.g. a 102 RPC reply) a decrypt failure is a real error
+      // — typically a rotated localKey after a reset / re-pairing — and must
+      // surface instead of being silently turned into unreadable padding.
+      if (protocol !== ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE) {
+        throw err;
+      }
       try {
         payload = decryptNoPad(encrypted, timestamp, localKey);
       } catch {
