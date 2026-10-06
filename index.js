@@ -46,7 +46,11 @@ import {
   consumablePercents,
   routineIdFromFeatureCode,
 } from './src/devices/vacuum.js';
-import { buildLastCleanStartState, extractLastCleanStart } from './src/devices/lastClean.js';
+import {
+  buildCleanedTodayState,
+  buildLastCleanStartState,
+  extractLastCleanStart,
+} from './src/devices/lastClean.js';
 import { computeSceneEvents, snapshotFromStatus } from './src/devices/sceneTriggers.js';
 import {
   FAN_POWER_MODES,
@@ -596,6 +600,10 @@ gladys.onPoll(async (device) => {
     if (lastCleanState) {
       states.push(lastCleanState);
     }
+
+    // "Cleaned today" (0/1): a scene condition can check whether the vacuum ran
+    // today. Always published (even 0) so both branches of the condition work.
+    states.push(buildCleanedTodayState(ids, lastCleanStart));
 
     const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
     const roomSelectionFeedback = buildRoomSelectionFeedback(

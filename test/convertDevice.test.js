@@ -40,6 +40,7 @@ test('convertDevice builds the Gladys discovered device for a robot', () => {
       'filter',
       'sensor-cleaning',
       'last-clean-start',
+      'cleaned-today',
     ],
   );
   // Each feature carries a unique selector equal to its external_id.
