@@ -58,6 +58,12 @@ ensuite en priorité par le **réseau local** (TCP), avec un repli sur le cloud
 (MQTT) si le robot n'est pas joignable. Le mode de communication utilisé est
 affiché sous forme de badge sur l'appareil.
 
+Si la connexion au cloud tombe, l'intégration se reconnecte d'elle-même, en
+attendant un peu plus après chaque échec. Lorsque Roborock refuse franchement la
+connexion (`Not authorized`), l'intégration attend une heure entre deux tentatives,
+et l'écran Configuration l'indique. Si le refus dure, demandez un nouveau code et
+liez à nouveau le compte.
+
 ## Limites
 
 - La **couche appareils** (transports MQTT et TCP local, commandes) n'a jamais été

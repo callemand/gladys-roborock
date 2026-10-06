@@ -57,8 +57,12 @@ function isVacuum(device, products) {
 export class RoborockAccountClient {
   /**
    * @param {object} [session] the persisted Roborock session (see session.js)
+   * @param {object} [options] options
+   * @param {Function} [options.onCloudStatus] called with 'connected' or
+   *   'unauthorized' as the cloud (MQTT) connection comes and goes
    */
-  constructor(session = {}) {
+  constructor(session = {}, { onCloudStatus = () => {} } = {}) {
+    this.onCloudStatus = onCloudStatus;
     this.rest = new RoborockRestClient(session);
     this.mqtt = null;
     this.devices = [];
@@ -225,7 +229,9 @@ export class RoborockAccountClient {
     if (this.mqtt) {
       await this.mqtt.disconnect();
     }
-    this.mqtt = new RoborockMqttTransport(this.rest.rriot, this.localKeys);
+    this.mqtt = new RoborockMqttTransport(this.rest.rriot, this.localKeys, {
+      onStatus: (status) => this.onCloudStatus(status),
+    });
     await this.mqtt.connect();
 
     await Promise.all(

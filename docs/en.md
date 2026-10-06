@@ -54,6 +54,12 @@ local encryption key and IP address. Commands and state readings then go through
 the **local network** first (TCP), falling back to the cloud (MQTT) when a robot
 is unreachable. The transport in use is shown as a badge on the device.
 
+If the cloud connection drops, the integration reconnects on its own, waiting a
+little longer after each failure. When Roborock refuses the connection outright
+(`Not authorized`), the integration waits an hour between attempts, and the
+Configuration screen says so. If the refusal lasts, ask for a new code and link
+the account again.
+
 ## Limitations
 
 - The **device layer** (MQTT and local TCP transports, commands) has never been
