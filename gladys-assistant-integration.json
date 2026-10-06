@@ -1,9 +1,7 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "categories": [
-    "appliances"
-  ],
+  "categories": ["appliances"],
   "name": "Roborock",
   "description": {
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery and routines.",
