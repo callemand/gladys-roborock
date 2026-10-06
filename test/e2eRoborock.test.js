@@ -29,6 +29,16 @@ const OTHER_EMAIL = 'other@example.com';
 const EMAIL_CODE = '482913';
 const ROUTINE_ID = 314;
 const RRIOT = { u: 'user-u', s: 'secret-s', h: 'hmac-h', k: 'key-k' };
+// HomeData names only the first room; the room list endpoint has both (issue #5)
+const ROOM_MAPPING = [
+  [16, '1001', 14],
+  [17, '1002', 14],
+];
+const HOME_DATA_ROOMS = [{ id: 1001, name: 'Cuisine' }];
+const HOME_ROOMS = [
+  { id: 1001, name: 'Cuisine' },
+  { id: 1002, name: 'Salon' },
+];
 const MQTT_USERNAME = md5hex(`${RRIOT.u}:${RRIOT.k}`).slice(2, 10);
 const RESP_TOPIC = `rr/m/o/${RRIOT.u}/${MQTT_USERNAME}/${DUID}`;
 
@@ -70,6 +80,9 @@ async function startFakeBroker() {
         dust_collection_count: 35,
         records: [1786961500, 1786885623],
       };
+    } else if (inner.method === 'get_room_mapping') {
+      // [segment id, IoT room id, room type], as a recent firmware answers
+      result = ROOM_MAPPING;
     } else if (inner.method === 'get_network_info') {
       // No IP: the integration stays on the cloud transport. The local TCP path
       // has its own coverage in test/roborockProtocol.test.js.
@@ -182,9 +195,13 @@ function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
                 },
               ],
               receivedDevices: [],
+              rooms: HOME_DATA_ROOMS,
             },
           }),
         );
+      } else if (url.pathname === '/user/homes/7/rooms') {
+        assert.match(String(req.headers.authorization), /^Hawk /);
+        res.end(JSON.stringify({ success: true, result: HOME_ROOMS }));
       } else if (url.pathname === `/user/scene/device/${DUID}`) {
         assert.match(String(req.headers.authorization), /^Hawk /);
         res.end(
@@ -342,8 +359,19 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
         'side-brush',
         'filter',
         'sensor-cleaning',
+        'room',
         `routine-${ROUTINE_ID}`,
         'last-clean-start',
+      ],
+    );
+    // every room by its name, including the one HomeData did not name
+    const room = vacuum.features.find((feature) => feature.external_id.endsWith(':room'));
+    assert.deepEqual(
+      room.supported_options.map((option) => [option.value, option.label]),
+      [
+        [room.supported_options[0].value, '—'],
+        ['16', 'Cuisine'],
+        ['17', 'Salon'],
       ],
     );
     const routine = vacuum.features.find((feature) =>
@@ -407,6 +435,8 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
         device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:last-clean-start`,
         state: 1786961500,
       },
+      // no room cleaning in progress: the room selector shows none
+      { device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:room`, text: 'none' },
     ]);
     assert.ok(
       broker.commands.some((c) => c.method === 'get_status'),

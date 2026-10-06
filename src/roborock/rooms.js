@@ -7,14 +7,13 @@
 // -----------------------------------------------------------------------------
 
 /**
- * Convert a get_room_mapping response into rooms usable by Gladys.
+ * The `[segmentId, iotRoomId]` pairs of a get_room_mapping response.
  * Roborock has been observed returning either one flat pair or a list of pairs.
  * Some transports additionally wrap the result in a single-element array.
  * @param {*} response raw get_room_mapping RPC result
- * @param {Array<object>} homeRooms HomeData.rooms (`{ id, name }`)
- * @returns {Array<{id: number, name: string}>} active-map rooms
+ * @returns {Array<{segmentId: number, iotId: string}>} the pairs, one per segment
  */
-export function normalizeRoomMappings(response, homeRooms = []) {
+export function roomMappingEntries(response) {
   let entries = response;
 
   if (
@@ -34,14 +33,8 @@ export function normalizeRoomMappings(response, homeRooms = []) {
     return [];
   }
 
-  const namesByIotId = new Map(
-    homeRooms
-      .filter((room) => room && room.id !== undefined && room.id !== null)
-      .map((room) => [String(room.id), String(room.name || '').trim()]),
-  );
-
   const seenSegmentIds = new Set();
-  const rooms = [];
+  const pairs = [];
 
   for (const entry of entries) {
     if (!Array.isArray(entry) || entry.length < 2) {
@@ -55,16 +48,47 @@ export function normalizeRoomMappings(response, homeRooms = []) {
     }
 
     seenSegmentIds.add(segmentId);
-
-    const name = namesByIotId.get(String(entry[1]));
-
-    rooms.push({
-      id: segmentId,
-      name: name || `Room ${segmentId}`,
-    });
+    pairs.push({ segmentId, iotId: String(entry[1]) });
   }
 
-  return rooms;
+  return pairs;
+}
+
+/**
+ * The IoT room ids of a get_room_mapping response that have no name among the
+ * given rooms. HomeData.rooms is not always complete (issue #5): a non-empty
+ * result means the room list must be fetched on its own.
+ * @param {*} response raw get_room_mapping RPC result
+ * @param {Array<object>} homeRooms the known rooms (`{ id, name }`)
+ * @returns {Array<string>} the unnamed IoT room ids
+ */
+export function unnamedIotIds(response, homeRooms = []) {
+  const names = roomNamesByIotId(homeRooms);
+  return roomMappingEntries(response)
+    .map((entry) => entry.iotId)
+    .filter((iotId) => !names.get(iotId));
+}
+
+function roomNamesByIotId(homeRooms) {
+  return new Map(
+    homeRooms
+      .filter((room) => room && room.id !== undefined && room.id !== null)
+      .map((room) => [String(room.id), String(room.name || '').trim()]),
+  );
+}
+
+/**
+ * Convert a get_room_mapping response into rooms usable by Gladys.
+ * @param {*} response raw get_room_mapping RPC result
+ * @param {Array<object>} homeRooms HomeData.rooms (`{ id, name }`)
+ * @returns {Array<{id: number, name: string}>} active-map rooms
+ */
+export function normalizeRoomMappings(response, homeRooms = []) {
+  const names = roomNamesByIotId(homeRooms);
+  return roomMappingEntries(response).map(({ segmentId, iotId }) => ({
+    id: segmentId,
+    name: names.get(iotId) || `Room ${segmentId}`,
+  }));
 }
 
 /**
