@@ -6,6 +6,13 @@
 //     `rr/m/o/...` to receive the answer;
 //   - each command is a protocol-101 message, correlated to its protocol-102
 //     answer by the RPC id.
+//
+// ONE client per transport, reconnecting on its own with a growing delay. The
+// broker treats a burst of connections as abuse and answers every later one with
+// `Connection refused: Not authorized` (rc 5), the same refusal as for revoked
+// credentials (issue #4). Opening a new client per request while the broker was
+// unreachable, each one retrying every 5 s and none ever closed, made exactly
+// such a burst: the logs of that issue show a dozen of them failing at once.
 // -----------------------------------------------------------------------------
 
 import mqtt from 'mqtt';
@@ -25,6 +32,15 @@ import {
 const logger = createLogger({ name: 'roborock:mqtt' });
 
 const RESPONSE_TIMEOUT_MS = 15000;
+// Reconnect delays, the values python-roborock settled on for the same broker: a
+// first retry after 10 s, then 1.5x longer each time it fails.
+const MIN_BACKOFF_MS = 10 * 1000;
+const MAX_BACKOFF_MS = 10 * 60 * 1000;
+const BACKOFF_MULTIPLIER = 1.5;
+// After a `Not authorized`, retrying soon only extends the refusal.
+const UNAUTHORIZED_BACKOFF_MS = 60 * 60 * 1000;
+// CONNACK return code 5 (MQTT 3.1.1).
+const RC_NOT_AUTHORIZED = 5;
 
 /**
  * Translate the rriot MQTT URL scheme to the one mqtt.js expects.
@@ -39,8 +55,13 @@ export class RoborockMqttTransport {
   /**
    * @param {object} rriot the rriot credentials (u, s, k, r { m })
    * @param {Map<string, string>} localKeys map of duid -> localKey
+   * @param {object} [options] options
+   * @param {Function} [options.onStatus] called with 'connected' on every
+   *   (re)connection and 'unauthorized' when the broker refuses the credentials
+   * @param {object} [options.backoff] reconnect delays in ms ({ min, max,
+   *   unauthorized }), overridden by the tests only
    */
-  constructor(rriot, localKeys) {
+  constructor(rriot, localKeys, { onStatus = () => {}, backoff = {} } = {}) {
     this.rriot = rriot;
     this.localKeys = localKeys;
     // Credentials are substrings of the HEX digests, not base64.
@@ -49,6 +70,15 @@ export class RoborockMqttTransport {
     this.client = null;
     this.pending = new Map(); // `${duid}:${id}` -> { resolve, reject, timer }
     this.rawWaiters = []; // one-shot waiters for non-102 frames (e.g. 301 map)
+    this.onStatus = onStatus;
+    this.backoff = {
+      min: MIN_BACKOFF_MS,
+      max: MAX_BACKOFF_MS,
+      unauthorized: UNAUTHORIZED_BACKOFF_MS,
+      ...backoff,
+    };
+    this.unauthorized = false;
+    this.lastError = null;
   }
 
   publishTopic(duid) {
@@ -61,25 +91,37 @@ export class RoborockMqttTransport {
 
   /**
    * Connect to the broker and subscribe to every known device topic.
+   *
+   * The client is created once. If this first attempt fails it is kept, and
+   * keeps retrying in the background; so does it after any later disconnection.
+   * mqtt.js then restores the subscriptions by itself.
    */
   async connect() {
-    if (this.client && this.client.connected) {
-      return;
+    if (this.client) {
+      if (this.client.connected) {
+        return;
+      }
+      throw this.#notConnectedError();
     }
     const url = toMqttUrl(this.rriot.r.m);
     logger.debug(`Connecting to the Roborock broker ${url}`);
-    await new Promise((resolve, reject) => {
-      const client = mqtt.connect(url, {
-        username: this.username,
-        password: this.password,
-        // MQTT 3.1.1: accepted by the Roborock broker and the widest-compatible.
-        protocolVersion: 4,
-        clean: true,
-        reconnectPeriod: 5000,
-        connectTimeout: RESPONSE_TIMEOUT_MS,
-      });
-      this.client = client;
+    const client = mqtt.connect(url, {
+      username: this.username,
+      password: this.password,
+      // MQTT 3.1.1: accepted by the Roborock broker and the widest-compatible.
+      protocolVersion: 4,
+      clean: true,
+      // read again by mqtt.js before every retry: the handlers below grow it
+      reconnectPeriod: this.backoff.min,
+      connectTimeout: RESPONSE_TIMEOUT_MS,
+    });
+    this.client = client;
+    client.on('message', (topic, message) => this.#onMessage(topic, message));
+    client.on('connect', () => this.#onConnect(client));
+    client.on('error', (err) => this.#onError(client, err));
+    client.on('reconnect', () => this.#growBackoff(client));
 
+    await new Promise((resolve, reject) => {
       const onError = (err) => {
         client.removeListener('connect', onConnect);
         reject(err);
@@ -90,8 +132,6 @@ export class RoborockMqttTransport {
       };
       client.once('connect', onConnect);
       client.once('error', onError);
-      client.on('message', (topic, message) => this.#onMessage(topic, message));
-      client.on('error', (err) => logger.warn('MQTT error', err.message));
     });
 
     const topics = [...this.localKeys.keys()].map((duid) => this.subscribeTopic(duid));
@@ -100,7 +140,55 @@ export class RoborockMqttTransport {
         this.client.subscribe(topics, { qos: 0 }, (err) => (err ? reject(err) : resolve()));
       });
     }
-    logger.info('Connected to the Roborock cloud');
+  }
+
+  #onConnect(client) {
+    const wasRefused = this.unauthorized;
+    this.unauthorized = false;
+    this.lastError = null;
+    client.options.reconnectPeriod = this.backoff.min;
+    logger.info(
+      wasRefused
+        ? 'Roborock cloud accepted the connection again'
+        : 'Connected to the Roborock cloud',
+    );
+    this.onStatus('connected');
+  }
+
+  #onError(client, err) {
+    if (err.code === RC_NOT_AUTHORIZED) {
+      client.options.reconnectPeriod = this.backoff.unauthorized;
+      if (!this.unauthorized) {
+        this.unauthorized = true;
+        this.onStatus('unauthorized');
+      }
+    }
+    // once per kind of failure, not once per attempt
+    const message = err.message || err.code || String(err);
+    if (message !== this.lastError) {
+      this.lastError = message;
+      logger.warn(
+        `MQTT error ${message}, retrying in ${Math.round(client.options.reconnectPeriod / 1000)} s`,
+      );
+    }
+  }
+
+  #growBackoff(client) {
+    // called as an attempt starts: it sets the delay before the NEXT one
+    if (this.unauthorized) {
+      return;
+    }
+    const period = client.options.reconnectPeriod * BACKOFF_MULTIPLIER;
+    client.options.reconnectPeriod = Math.min(Math.round(period), this.backoff.max);
+  }
+
+  #notConnectedError() {
+    const seconds = Math.round(this.client.options.reconnectPeriod / 1000);
+    return new Error(
+      this.unauthorized
+        ? `Roborock refuses the cloud connection (Not authorized), next attempt within ${seconds} s`
+        : `Roborock cloud not connected, next attempt within ${seconds} s`,
+    );
   }
 
   /**
@@ -112,9 +200,8 @@ export class RoborockMqttTransport {
    * @returns {Promise<*>} the RPC result
    */
   async request(duid, method, params = [], extra = null) {
-    if (!this.client || !this.client.connected) {
-      await this.connect();
-    }
+    // never a second client: while this one reconnects, fail fast
+    await this.connect();
     const localKey = this.localKeys.get(duid);
     if (!localKey) {
       throw new Error(`Unknown Roborock device "${duid}" (no local key)`);

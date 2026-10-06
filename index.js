@@ -85,7 +85,9 @@ const EMAIL_KEY = 'roborock_email';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 let roborockEmail = null;
 let session = readSession();
-let roborock = new RoborockAccountClient(session);
+// whether the broker refusal was reported, so its recovery is reported too
+let cloudRefused = false;
+let roborock = newRoborockClient(session);
 
 // Appareils pour lesquels un nettoyage par pièce vient d'être demandé.
 // `active` passe à true uniquement après avoir observé un état Roborock
@@ -317,6 +319,35 @@ async function reportStatus(connected, message) {
 }
 
 /**
+ * A Roborock client wired to the connection badge.
+ * @param {object} clientSession the session to start from
+ * @returns {RoborockAccountClient} the client
+ */
+function newRoborockClient(clientSession) {
+  return new RoborockAccountClient(clientSession, { onCloudStatus });
+}
+
+/**
+ * Follow the cloud connection once the account is linked. The broker refuses a
+ * client it considers abusive the same way as revoked credentials, and lifts it
+ * after a while: the transport keeps retrying (hourly), the user is only told
+ * what is going on, and what to do if it lasts.
+ * @param {string} status 'connected' or 'unauthorized'
+ */
+function onCloudStatus(status) {
+  if (status === 'unauthorized') {
+    cloudRefused = true;
+    reportStatus(false, {
+      en: 'Roborock refuses the cloud connection. The integration retries every hour on its own; if it lasts, ask for a new code and link the account again.',
+      fr: "Roborock refuse la connexion au cloud. L'intégration réessaie d'elle-même toutes les heures ; si cela dure, demandez un nouveau code et liez à nouveau le compte.",
+    });
+  } else if (status === 'connected' && cloudRefused) {
+    cloudRefused = false;
+    reportStatus(true, linkedMessage());
+  }
+}
+
+/**
  * Turn a login failure into something the user can act on, in their language.
  * @param {Error} err the failure
  * @returns {object} the multi-language message
@@ -344,12 +375,12 @@ async function connect() {
   if (!isSessionUsable(session)) {
     // The deviceId is carried over even with no session: a code already sent was
     // issued for it, and drawing a new one here would refuse that code (2018).
-    roborock = new RoborockAccountClient({ deviceId: session.deviceId });
+    roborock = newRoborockClient({ deviceId: session.deviceId });
     logger.info('Account not linked yet: ask for a code from the integration settings');
     await reportStatus(false);
     return false;
   }
-  roborock = new RoborockAccountClient(session);
+  roborock = newRoborockClient(session);
   try {
     await roborock.login();
   } catch (err) {
@@ -734,7 +765,7 @@ gladys.onAction('roborock_link', async (fields) => {
 
 gladys.onAction('roborock_unlink', async () => {
   await roborock.logout();
-  roborock = new RoborockAccountClient({});
+  roborock = newRoborockClient({});
   session = {};
   await gladys
     .setConfig(clearedSessionConfig())
