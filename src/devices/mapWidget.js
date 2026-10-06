@@ -21,32 +21,45 @@ import { FEATURE_CODES, VACUUM_CLEANER_CLEAN_MODE, VACUUM_CLEANER_MODE } from '.
 export const MAP_WIDGET_KEY = 'map';
 
 // Bumped whenever the renderer OUTPUT changes, so the core (which caches a widget
-// image one hour per key) serves the new render even when the robot's map
-// sequence has not changed. The widget CONTENT is re-pulled on its own ttl.
-export const MAP_RENDER_VERSION = 7;
+// image one hour per key) serves the new render. The widget CONTENT is re-pulled
+// on its own ttl.
+export const MAP_RENDER_VERSION = 8;
 
 // The core caps an image key at 64 characters (`^[a-z0-9][a-z0-9-]{0,63}$`). The
-// hex form `map-<hex(duid)>-<seq>-r<ver>` is reversible and survives a restart,
+// hex form `map-<hex(duid)>-<sig>-r<ver>` is reversible and survives a restart,
 // but hex doubles the duid length, so for a long duid the key would overflow. In
 // that case we fall back to a short hash and keep the duid in this registry for
 // the reverse lookup (onWidgetGetImage), with the hex decode as the primary path.
 const duidByHashedKey = new Map();
+const MAX_HASHED_KEYS = 64;
+
+function rememberHashedKey(key, duid) {
+  duidByHashedKey.set(key, duid);
+  // The signature changes on every visual change, so cap the registry (the live
+  // map can produce many keys per cleaning) and evict the oldest entries.
+  while (duidByHashedKey.size > MAX_HASHED_KEYS) {
+    duidByHashedKey.delete(duidByHashedKey.keys().next().value);
+  }
+}
 
 /**
  * Build the per-map image key, matching the core grammar `^[a-z0-9][a-z0-9-]{0,63}$`.
+ * The signature is a marker of the rendered image: pass a hash of the PNG bytes so
+ * the key — and therefore the core's cached image — changes only when the picture
+ * actually changes (no needless `<img>` swap / flash when nothing moved).
  * @param {string} duid the Roborock device id
- * @param {number} sequence the RRMap map sequence (change marker)
+ * @param {string|number} signature a change marker of the rendered image
  * @returns {string} the image key
  */
-export function mapImageKey(duid, sequence) {
-  const seq = Number(sequence) || 0;
-  const hexKey = `map-${Buffer.from(String(duid)).toString('hex')}-${seq}-r${MAP_RENDER_VERSION}`;
+export function mapImageKey(duid, signature) {
+  const sig = String(signature);
+  const hexKey = `map-${Buffer.from(String(duid)).toString('hex')}-${sig}-r${MAP_RENDER_VERSION}`;
   if (hexKey.length <= 64) {
     return hexKey;
   }
   const short = createHash('sha1').update(String(duid)).digest('hex').slice(0, 16);
-  const hashedKey = `maph-${short}-${seq}-r${MAP_RENDER_VERSION}`;
-  duidByHashedKey.set(hashedKey, String(duid));
+  const hashedKey = `maph-${short}-${sig}-r${MAP_RENDER_VERSION}`;
+  rememberHashedKey(hashedKey, String(duid));
   return hashedKey;
 }
 
@@ -56,7 +69,7 @@ export function mapImageKey(duid, sequence) {
  * @returns {string|null} the duid, or null when the key is not ours
  */
 export function duidFromImageKey(key) {
-  const match = /^map-([0-9a-f]+)-\d+(?:-r\d+)?$/.exec(String(key || ''));
+  const match = /^map-([0-9a-f]+)-[a-z0-9]+(?:-r\d+)?$/.exec(String(key || ''));
   if (match) {
     try {
       return Buffer.from(match[1], 'hex').toString('utf8');

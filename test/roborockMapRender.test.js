@@ -92,3 +92,21 @@ test('renderMapPng requires the pixel data', () => {
   const map = parseRRMap(buildMap()); // no includePixels
   assert.throws(() => renderMapPng(map), /includePixels/);
 });
+
+test('with targetLongestPx the output size is stable when only the robot moves', () => {
+  const dims = (png) => ({ w: png.readUInt32BE(16), h: png.readUInt32BE(20) });
+  const map = parseRRMap(buildMap(), { includePixels: true });
+  // Name the segments so the crop is based on the (stable) rooms, like in prod.
+  map.segments.forEach((segment) => {
+    segment.named = true;
+    segment.roomName = `Room ${segment.segmentId}`;
+  });
+
+  const before = dims(renderMapPng(map, { targetLongestPx: 300 }));
+  // The robot (and its path) move far away: the fixed frame must not resize.
+  map.robot = { x: 9_000_000, y: 9_000_000, angle: 0 };
+  const after = dims(renderMapPng(map, { targetLongestPx: 300 }));
+
+  assert.deepEqual(after, before);
+  assert.ok(before.w > 0 && before.h > 0);
+});

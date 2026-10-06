@@ -91,7 +91,14 @@ function asciiLabel(text) {
  * @returns {Buffer} the PNG bytes
  */
 export function renderMapPng(map, options = {}) {
-  const { scale = 4, margin = 3, flipY = true, drawPath = true, drawLabels = true } = options;
+  const {
+    scale: scaleOption = 4,
+    targetLongestPx = null,
+    margin = 3,
+    flipY = true,
+    drawPath = true,
+    drawLabels = true,
+  } = options;
   const img = map && map.image;
   if (!img || !img.pixels) {
     throw new Error('renderMapPng needs parseRRMap(data, { includePixels: true })');
@@ -148,6 +155,14 @@ export function renderMapPng(map, options = {}) {
   maxY = Math.min(height - 1, maxY + margin);
   const cropW = maxX - minX + 1;
   const cropH = maxY - minY + 1;
+
+  // Derive the scale from the (room-based, stable) crop so the same home always
+  // renders at the same output dimensions across refreshes: the frame no longer
+  // jumps/rescales when only the robot or the path move. `scale` (explicit px per
+  // cell) stays the fallback when no target size is requested.
+  const scale = targetLongestPx
+    ? Math.max(1, Math.min(6, Math.round(targetLongestPx / Math.max(cropW, cropH))))
+    : scaleOption;
 
   // --- 1. source-resolution colour layer (named rooms + their walls) ----------
   // Transparent everywhere else: walls stay one cell wide (the bilinear upscale
@@ -255,10 +270,15 @@ export function renderMapPng(map, options = {}) {
  * @returns {string} the raw base64 PNG
  */
 export function renderMapPngBase64(map, options = {}) {
-  const { maxBytes = 300 * 1024, startScale = 4 } = options;
-  let png = renderMapPng(map, { ...options, scale: startScale });
-  for (let scale = startScale - 1; scale >= 1 && png.length > maxBytes; scale -= 1) {
-    png = renderMapPng(map, { ...options, scale });
+  const { maxBytes = 300 * 1024, targetLongestPx = 900 } = options;
+  let target = targetLongestPx;
+  let png = renderMapPng(map, { ...options, targetLongestPx: target });
+  // Deterministic byte guard: shrink the target in fixed steps if the fixed-size
+  // render is over budget. It depends only on the (stable) content, so it does
+  // not flip between two sizes from one refresh to the next.
+  while (png.length > maxBytes && target > 320) {
+    target = Math.round(target * 0.82);
+    png = renderMapPng(map, { ...options, targetLongestPx: target });
   }
   return png.toString('base64');
 }

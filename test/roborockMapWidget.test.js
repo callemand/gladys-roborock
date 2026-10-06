@@ -29,6 +29,12 @@ test('mapImageKey changes with the map sequence', () => {
   assert.notEqual(mapImageKey(DUID, 4), mapImageKey(DUID, 5));
 });
 
+test('mapImageKey round-trips the duid with a hex (hash) signature', () => {
+  const key = mapImageKey(DUID, 'a1b2c3d4e5');
+  assert.match(key, /^[a-z0-9][a-z0-9-]{0,63}$/);
+  assert.equal(duidFromImageKey(key), DUID);
+});
+
 test('mapImageKey stays within the 64-char core limit and still round-trips a long duid', () => {
   const longDuid = 'D'.repeat(48); // hex form would overflow 64 chars
   const key = mapImageKey(longDuid, 7);
