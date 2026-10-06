@@ -13,6 +13,7 @@
 // -----------------------------------------------------------------------------
 
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 
 import { ROBOROCK_V1_SALT } from '../constants.js';
 
@@ -86,6 +87,52 @@ export function encrypt(plaintext, timestamp, localKey) {
 export function decrypt(ciphertext, timestamp, localKey) {
   const decipher = crypto.createDecipheriv('aes-128-ecb', deriveKey(timestamp, localKey), null);
   decipher.setAutoPadding(true);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+/**
+ * AES-128-CBC decrypt (PKCS7, zero IV) a payload.
+ *
+ * Used for the SECOND encryption layer of a map (protocol 301) frame: after the
+ * usual per-message AES-ECB layer is removed, the map body is still encrypted in
+ * CBC with the per-request `nonce` the client sent in the command `security`
+ * field (IV is 16 zero bytes). Mirror of python-roborock's `Utils.decrypt_cbc`.
+ * @param {Buffer} ciphertext the encrypted map body
+ * @param {Buffer} key the 16-byte nonce used as the AES key
+ * @returns {Buffer} the plaintext (still gzip-compressed)
+ */
+export function decryptCbc(ciphertext, key) {
+  const iv = Buffer.alloc(16); // zero IV
+  const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+  decipher.setAutoPadding(true);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+/**
+ * gzip-decompress a buffer (the innermost layer of a map frame is a gzipped
+ * RRMap blob).
+ * @param {Buffer} buffer the gzipped bytes
+ * @returns {Buffer} the decompressed bytes
+ */
+export function gunzip(buffer) {
+  return zlib.gunzipSync(buffer);
+}
+
+/**
+ * AES-128-ECB decrypt WITHOUT PKCS7 unpadding.
+ *
+ * The strict {@link decrypt} throws when the plaintext is not PKCS7-padded. Map
+ * (protocol 301) frames are padded in practice, but a tolerant fallback keeps a
+ * single odd frame from crashing the decoder and wiping the stream buffer: the
+ * caller gets the raw blocks and can diagnose rather than lose the capture.
+ * @param {Buffer} ciphertext the encrypted payload
+ * @param {number} timestamp the message timestamp (from the received header)
+ * @param {string} localKey the device local key
+ * @returns {Buffer} the plaintext, padding bytes included
+ */
+export function decryptNoPad(ciphertext, timestamp, localKey) {
+  const decipher = crypto.createDecipheriv('aes-128-ecb', deriveKey(timestamp, localKey), null);
+  decipher.setAutoPadding(false);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 

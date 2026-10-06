@@ -30,12 +30,28 @@ import {
   vacuumExternalIds,
 } from './src/devices/convertDevice.js';
 import {
+  MAP_WIDGET_KEY,
+  buildMapWidgetContent,
+  duidFromImageKey,
+  mapImageKey,
+} from './src/devices/mapWidget.js';
+import { renderMapPngBase64 } from './src/roborock/mapRender.js';
+import {
   buildConsumableStates,
   buildDockStates,
   buildPollStates,
   buildSetCommand,
+  consumablePercents,
   routineIdFromFeatureCode,
 } from './src/devices/vacuum.js';
+import { buildLastCleanStartState, extractLastCleanStart } from './src/devices/lastClean.js';
+import { computeSceneEvents, snapshotFromStatus } from './src/devices/sceneTriggers.js';
+import {
+  FAN_POWER_MODES,
+  SCENE_ACTIONS,
+  resolveRoomSegments,
+  resolveRoutineId,
+} from './src/devices/sceneActions.js';
 import {
   SESSION_KEYS,
   clearedSessionConfig,
@@ -46,6 +62,8 @@ import {
 } from './src/session.js';
 import {
   FEATURE_CODES,
+  ROBOROCK_CLEANING_STATES,
+  ROBOROCK_METHOD,
   ROBOROCK_SEGMENT_CLEANING_STATES,
   ROOM_SELECTION_NONE,
 } from './src/constants.js';
@@ -77,6 +95,52 @@ const roomCleanings = new Map();
 // Permet de remettre à zéro une ancienne sélection après un redémarrage de
 // l'intégration, sans effacer une nouvelle sélection avant son démarrage.
 const initializedRoomSelectors = new Set();
+
+// Dernier instantané (snapshot) connu par robot, pour détecter les transitions
+// qui déclenchent les scènes. La première observation ne fait qu'amorcer le
+// cache : aucun événement n'est émis au démarrage de l'intégration.
+const sceneSnapshots = new Map();
+
+/**
+ * Detect the robot transitions since the last poll and fire the matching scene
+ * triggers. Never throws: a trigger failure must not break the poll.
+ * @param {object} device the Gladys device being polled
+ * @param {string} duid the Roborock device id
+ * @param {object} status the get_status result
+ * @param {object} consumable the get_consumable result
+ * @returns {Promise<void>}
+ */
+async function publishSceneTriggers(device, duid, status, consumable) {
+  try {
+    const snapshot = snapshotFromStatus(status, consumablePercents(consumable));
+    const previous = sceneSnapshots.get(duid) || null;
+    sceneSnapshots.set(duid, snapshot);
+
+    const events = computeSceneEvents(previous, snapshot, {
+      vacuum: device.external_id,
+      deviceName: device.name || duid,
+    });
+    for (const event of events) {
+      await gladys.publishSceneEvent(event.key, event.data);
+    }
+  } catch (err) {
+    logger.warn(`Could not publish scene triggers for ${duid}: ${err.message}`);
+  }
+}
+
+/**
+ * Cleaning-history cache.
+ *
+ * get_clean_summary is not guaranteed to be supported locally and can therefore
+ * use the Roborock cloud. Do not execute it on every Gladys poll.
+ *
+ * The QV 35A exposes status.last_clean_t, which corresponds to the end of the
+ * latest cleaning. We use it only as a change marker: the actual feature exposed
+ * to Gladys is the cleaning START timestamp from get_clean_summary.records[0].
+ */
+const cleanHistoryCache = new Map();
+
+const CLEAN_HISTORY_REFRESH_MS = 5 * 60 * 1000;
 
 /**
  * Build the room selector feedback produced by a robot status change.
@@ -124,6 +188,83 @@ function buildRoomSelectionFeedback(duid, ids, status, hasRoomSelector) {
     device_feature_external_id: ids.feature(FEATURE_CODES.ROOM),
     text: ROOM_SELECTION_NONE,
   };
+}
+
+/**
+ * Get the latest cleaning start timestamp while limiting history RPC traffic.
+ *
+ * Verified on Roborock QV 35A (roborock.vacuum.a168):
+ *
+ *   get_clean_summary.records[0] = get_clean_record(...)[0].begin
+ *   get_status.last_clean_t       = get_clean_record(...)[0].end
+ *
+ * last_clean_t is therefore only used as a cheap change detector.
+ *
+ * On models that do not expose last_clean_t, the summary is refreshed
+ * periodically instead.
+ *
+ * @param {string} duid Roborock device id
+ * @param {object} status get_status result
+ * @returns {Promise<number|null>} Unix timestamp in seconds
+ */
+async function getLastCleanStartForPoll(duid, status) {
+  const rawLastCleanEnd = Number(status?.last_clean_t);
+  const lastCleanEnd =
+    Number.isSafeInteger(rawLastCleanEnd) && rawLastCleanEnd > 0 ? rawLastCleanEnd : null;
+
+  const now = Date.now();
+  const cached = cleanHistoryCache.get(duid);
+
+  const roborockState = Number(status?.state);
+  const isCleaning = ROBOROCK_CLEANING_STATES.has(roborockState);
+  const cleaningStarted = isCleaning && cached?.wasCleaning === false;
+
+  const markerChanged =
+    lastCleanEnd !== null &&
+    cached?.lastCleanEnd !== undefined &&
+    lastCleanEnd !== cached.lastCleanEnd;
+
+  const periodicRefreshDue = !cached || now >= (cached.nextRefreshAt || 0);
+
+  // Refresh immediately when a cleaning starts, and again when last_clean_t
+  // changes (normally when that cleaning ends). This makes Last clean start
+  // useful while a cleaning is still in progress instead of only afterwards.
+  if (!cleaningStarted && !markerChanged && !periodicRefreshDue) {
+    if (cached) {
+      cached.wasCleaning = isCleaning;
+    }
+    return cached?.lastCleanStart ?? null;
+  }
+
+  try {
+    const summary = await roborock.getCleanSummary(duid);
+    const lastCleanStart = extractLastCleanStart(summary);
+
+    cleanHistoryCache.set(duid, {
+      lastCleanEnd,
+      lastCleanStart,
+      wasCleaning: isCleaning,
+      nextRefreshAt:
+        lastCleanEnd === null ? now + CLEAN_HISTORY_REFRESH_MS : Number.POSITIVE_INFINITY,
+    });
+
+    return lastCleanStart;
+  } catch (err) {
+    logger.warn(`Could not get cleaning history for ${duid}: ${err.message}`);
+
+    // Store the CURRENT lastCleanEnd (not the stale cached one) so a model that
+    // does not support get_clean_summary — or an unreachable cloud — does not
+    // keep `markerChanged` true and retry the (possibly 15s-timeout) call on
+    // every 30s poll. The periodic refresh (nextRefreshAt) still applies.
+    cleanHistoryCache.set(duid, {
+      lastCleanEnd,
+      lastCleanStart: cached?.lastCleanStart ?? null,
+      wasCleaning: isCleaning,
+      nextRefreshAt: now + CLEAN_HISTORY_REFRESH_MS,
+    });
+
+    return cached?.lastCleanStart ?? null;
+  }
 }
 
 /**
@@ -327,6 +468,66 @@ gladys.onSetValue(async (device, feature, value) => {
   }
 });
 
+// --- Scene actions: a scene commands the robot -------------------------------
+// Each action carries a `vacuum` field (source: "devices"): its value is the
+// device external_id, from which the duid is parsed.
+function sceneActionDuid(fields) {
+  const vacuum = fields && fields.vacuum;
+  if (typeof vacuum !== 'string' || !vacuum) {
+    throw new Error('The "vacuum" field is required');
+  }
+  return parseExternalId(vacuum).duid;
+}
+
+gladys.onSceneAction(SCENE_ACTIONS.START_CLEANING, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_START, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.PAUSE_CLEANING, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_PAUSE, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.STOP_CLEANING, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_STOP, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.RETURN_TO_DOCK, async (fields) => {
+  await roborock.sendCommand(sceneActionDuid(fields), ROBOROCK_METHOD.APP_CHARGE, []);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.SET_FAN_POWER, async (fields) => {
+  const duid = sceneActionDuid(fields);
+  const cleanMode = FAN_POWER_MODES[String(fields.mode)];
+  if (cleanMode === undefined) {
+    throw new Error(`Unknown fan power mode: "${fields.mode}"`);
+  }
+  const command = buildSetCommand(FEATURE_CODES.CLEAN_MODE, cleanMode);
+  if (!command) {
+    throw new Error(`Fan power mode "${fields.mode}" is not controllable`);
+  }
+  await roborock.sendCommand(duid, command.method, command.params);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.CLEAN_ROOMS, async (fields) => {
+  const duid = sceneActionDuid(fields);
+  const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
+  const segments = resolveRoomSegments(fields.rooms, robot?.rooms || []);
+  if (segments.length === 0) {
+    throw new Error(`No known room matched "${fields.rooms}"`);
+  }
+  await roborock.sendCommand(duid, ROBOROCK_METHOD.APP_SEGMENT_CLEAN, [{ segments }]);
+});
+
+gladys.onSceneAction(SCENE_ACTIONS.RUN_ROUTINE, async (fields) => {
+  const duid = sceneActionDuid(fields);
+  const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
+  const routineId = resolveRoutineId(fields.routine, robot?.routines || []);
+  if (routineId === null) {
+    throw new Error(`No known routine matched "${fields.routine}"`);
+  }
+  await roborock.executeRoutine(routineId);
+});
+
 // --- Polling: Gladys asks to refresh a device --------------------------------
 gladys.onPoll(async (device) => {
   const { slug, duid } = parseExternalId(device.external_id);
@@ -345,6 +546,14 @@ gladys.onPoll(async (device) => {
     ]);
     const ids = vacuumExternalIds(gladys, duid);
     states = [...buildPollStates(ids, status), ...buildConsumableStates(ids, consumable)];
+
+    const lastCleanStart = await getLastCleanStartForPoll(duid, status);
+    const lastCleanState = buildLastCleanStartState(ids, lastCleanStart);
+
+    if (lastCleanState) {
+      states.push(lastCleanState);
+    }
+
     const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
     const roomSelectionFeedback = buildRoomSelectionFeedback(
       duid,
@@ -356,12 +565,105 @@ gladys.onPoll(async (device) => {
     if (roomSelectionFeedback) {
       states.push(roomSelectionFeedback);
     }
+
+    await publishSceneTriggers(device, duid, status, consumable);
   }
 
   if (states.length > 0) {
     await gladys.publishStates(states);
   }
   await publishTransport(duid, device.external_id);
+});
+
+// --- Map dashboard widget ----------------------------------------------------
+// The map is exposed as a dashboard widget (SDK >= 0.14), not a device: Gladys
+// pulls the content (onWidgetGet) and the image bytes (onWidgetGetImage). A small
+// cache holds the last rendered PNG per image key so the two calls of one refresh
+// do not fetch the map twice; on a cold cache the duid is recovered from the key.
+const MAP_IMAGE_CACHE_MAX = 8;
+const mapImageCache = new Map(); // imageKey -> PNG base64
+
+function cacheMapImage(key, base64) {
+  mapImageCache.set(key, base64);
+  while (mapImageCache.size > MAP_IMAGE_CACHE_MAX) {
+    mapImageCache.delete(mapImageCache.keys().next().value);
+  }
+}
+
+// Short-lived parsed-map + PNG cache per robot, with in-flight de-duplication.
+// Without it every dashboard refresh (content ttl) and every image cache-miss
+// would fire a fresh get_map_v1 (up to 10s local + 10s cloud) plus a synchronous
+// PNG render, and concurrent viewers of the same robot would arm overlapping 301
+// waiters (AES "bad decrypt"). A single in-flight request is shared, and its
+// result is reused for a short window.
+const MAP_RENDER_TTL_MS = 60 * 1000;
+const mapRenderCache = new Map(); // duid -> { at, map, base64 }
+const mapRenderInFlight = new Map(); // duid -> Promise<{ map, base64 }>
+
+async function renderMapForDuid(duid) {
+  const cached = mapRenderCache.get(duid);
+  if (cached && Date.now() - cached.at < MAP_RENDER_TTL_MS) {
+    return cached;
+  }
+  const pending = mapRenderInFlight.get(duid);
+  if (pending) {
+    return pending;
+  }
+  const promise = (async () => {
+    if (!roborock.isLoggedIn() && !(await connect())) {
+      throw new Error('The Roborock account is not linked yet');
+    }
+    const map = await roborock.getMap(duid, { includePixels: true });
+    const entry = { at: Date.now(), map, base64: renderMapPngBase64(map) };
+    mapRenderCache.set(duid, entry);
+    return entry;
+  })();
+  mapRenderInFlight.set(duid, promise);
+  try {
+    return await promise;
+  } finally {
+    mapRenderInFlight.delete(duid);
+  }
+}
+
+gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
+  const vacuumExternalId = settings && settings.vacuum;
+  if (!vacuumExternalId) {
+    throw new Error('No vacuum selected for the map widget');
+  }
+  const { duid } = parseExternalId(vacuumExternalId);
+  logger.info(`onWidgetGet(map) <- ${duid}`);
+  const { map, base64 } = await renderMapForDuid(duid);
+  const imageKey = mapImageKey(duid, map.mapSequence);
+  cacheMapImage(imageKey, base64);
+  // The map image is ready; gather the live numbers for the tiles / status block.
+  const [status, consumables] = await Promise.all([
+    roborock.getStatus(duid).catch((err) => {
+      logger.warn(`Widget: could not get status for ${duid}: ${err.message}`);
+      return {};
+    }),
+    roborock
+      .getConsumable(duid)
+      .then((c) => consumablePercents(c))
+      .catch(() => ({})),
+  ]);
+  await publishTransport(duid, vacuumExternalId);
+  return buildMapWidgetContent(map, { imageKey, vacuumExternalId, status, consumables, settings });
+});
+
+gladys.onWidgetGetImage(async (imageKey) => {
+  const cached = mapImageCache.get(imageKey);
+  if (cached) {
+    return cached;
+  }
+  const duid = duidFromImageKey(imageKey);
+  if (!duid) {
+    throw new Error(`Unknown map image key: ${imageKey}`);
+  }
+  logger.info(`onWidgetGetImage <- re-rendering ${duid} (cache miss)`);
+  const { base64 } = await renderMapForDuid(duid);
+  cacheMapImage(imageKey, base64);
+  return base64;
 });
 
 // --- The two actions that link the account ------------------------------------
@@ -489,6 +791,17 @@ gladys.on('disconnected', () => {
 gladys.handleShutdown(async (signal) => {
   logger.info(`Received ${signal} -> graceful shutdown`);
   await roborock.logout();
+});
+
+// --- Resilience --------------------------------------------------------------
+// Log an uncaught exception, then let the process exit so Gladys restarts the
+// container in a clean state rather than leaving it running undefined. Unhandled
+// rejections are deliberately NOT swallowed: the known source (the 301 waiter)
+// is handled at its await site, and masking the rest would hide real bugs while
+// the integration silently stops publishing.
+process.on('uncaughtException', (err) => {
+  logger.error(`Uncaught exception, exiting: ${err && err.message ? err.message : err}`);
+  process.exit(1);
 });
 
 // --- Startup -----------------------------------------------------------------

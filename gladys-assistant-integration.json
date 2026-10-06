@@ -7,9 +7,9 @@
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery and routines.",
     "fr": "Aspirateurs robots de l'application Roborock : état, marche/arrêt, aspiration, base, routines."
   },
-  "version": "2.3.0",
-  "docker_image": "ghcr.io/callemand/gladys-roborock:2.3.0",
-  "gladys_version": ">=4.86.0",
+  "version": "2.4.0",
+  "docker_image": "ghcr.io/callemand/gladys-roborock:2.4.0",
+  "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
   "config_schema": [
     {
@@ -87,6 +87,497 @@
         "fr": "Oublie la session enregistrée ; les robots ne sont plus découverts."
       },
       "timeout_seconds": 30
+    }
+  ],
+  "widgets": [
+    {
+      "key": "map",
+      "label": {
+        "en": "Vacuum",
+        "fr": "Aspirateur"
+      },
+      "icon": "wind",
+      "settings": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": {
+            "en": "Vacuum",
+            "fr": "Aspirateur"
+          }
+        },
+        {
+          "key": "action1",
+          "type": "select",
+          "default": "quiet",
+          "label": {
+            "en": "Action button 3",
+            "fr": "Bouton action 3"
+          },
+          "options": [
+            {
+              "value": "none",
+              "label": {
+                "en": "None",
+                "fr": "Aucun"
+              }
+            },
+            {
+              "value": "start",
+              "label": {
+                "en": "Start",
+                "fr": "Démarrer"
+              }
+            },
+            {
+              "value": "stop",
+              "label": {
+                "en": "Stop",
+                "fr": "Arrêter"
+              }
+            },
+            {
+              "value": "dock",
+              "label": {
+                "en": "Dock",
+                "fr": "Retour base"
+              }
+            },
+            {
+              "value": "quiet",
+              "label": {
+                "en": "Quiet",
+                "fr": "Silencieux"
+              }
+            },
+            {
+              "value": "balanced",
+              "label": {
+                "en": "Balanced",
+                "fr": "Équilibré"
+              }
+            },
+            {
+              "value": "turbo",
+              "label": {
+                "en": "Turbo",
+                "fr": "Turbo"
+              }
+            },
+            {
+              "value": "max",
+              "label": {
+                "en": "Max",
+                "fr": "Max"
+              }
+            }
+          ]
+        },
+        {
+          "key": "action2",
+          "type": "select",
+          "default": "turbo",
+          "label": {
+            "en": "Action button 4",
+            "fr": "Bouton action 4"
+          },
+          "options": [
+            {
+              "value": "none",
+              "label": {
+                "en": "None",
+                "fr": "Aucun"
+              }
+            },
+            {
+              "value": "start",
+              "label": {
+                "en": "Start",
+                "fr": "Démarrer"
+              }
+            },
+            {
+              "value": "stop",
+              "label": {
+                "en": "Stop",
+                "fr": "Arrêter"
+              }
+            },
+            {
+              "value": "dock",
+              "label": {
+                "en": "Dock",
+                "fr": "Retour base"
+              }
+            },
+            {
+              "value": "quiet",
+              "label": {
+                "en": "Quiet",
+                "fr": "Silencieux"
+              }
+            },
+            {
+              "value": "balanced",
+              "label": {
+                "en": "Balanced",
+                "fr": "Équilibré"
+              }
+            },
+            {
+              "value": "turbo",
+              "label": {
+                "en": "Turbo",
+                "fr": "Turbo"
+              }
+            },
+            {
+              "value": "max",
+              "label": {
+                "en": "Max",
+                "fr": "Max"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "scene_triggers": [
+    {
+      "key": "cleaning_started",
+      "label": { "en": "Cleaning started", "fr": "Nettoyage démarré" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        }
+      ]
+    },
+    {
+      "key": "cleaning_finished",
+      "label": { "en": "Cleaning finished", "fr": "Nettoyage terminé" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        },
+        {
+          "key": "duration_min",
+          "type": "number",
+          "label": { "en": "Duration (min)", "fr": "Durée (min)" }
+        },
+        { "key": "area_m2", "type": "number", "label": { "en": "Area (m²)", "fr": "Surface (m²)" } }
+      ]
+    },
+    {
+      "key": "returned_to_dock",
+      "label": { "en": "Returned to dock", "fr": "Retour à la base" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        }
+      ]
+    },
+    {
+      "key": "battery_low",
+      "label": { "en": "Battery low", "fr": "Batterie faible" },
+      "description": {
+        "en": "Fired when the battery drops to 20% or below.",
+        "fr": "Déclenché quand la batterie passe à 20 % ou moins."
+      },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        },
+        {
+          "key": "level",
+          "type": "number",
+          "label": { "en": "Battery level (%)", "fr": "Niveau de batterie (%)" }
+        }
+      ]
+    },
+    {
+      "key": "charging_complete",
+      "label": { "en": "Charging complete", "fr": "Charge terminée" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        }
+      ]
+    },
+    {
+      "key": "robot_error",
+      "label": { "en": "Error / needs attention", "fr": "Erreur / intervention requise" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        },
+        {
+          "key": "error_code",
+          "type": "number",
+          "label": { "en": "Error code", "fr": "Code erreur" }
+        },
+        { "key": "error_label", "type": "string", "label": { "en": "Error", "fr": "Erreur" } }
+      ]
+    },
+    {
+      "key": "consumable_worn",
+      "label": { "en": "Consumable needs replacing", "fr": "Consommable à remplacer" },
+      "description": {
+        "en": "Fired when a consumable's remaining life drops to 10% or below.",
+        "fr": "Déclenché quand la durée de vie restante d'un consommable passe à 10 % ou moins."
+      },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        },
+        {
+          "key": "consumable",
+          "type": "select",
+          "label": { "en": "Consumable", "fr": "Consommable" },
+          "options": [
+            { "value": "filter", "label": { "en": "Filter", "fr": "Filtre" } },
+            { "value": "main_brush", "label": { "en": "Main brush", "fr": "Brosse principale" } },
+            { "value": "side_brush", "label": { "en": "Side brush", "fr": "Brosse latérale" } },
+            { "value": "sensor", "label": { "en": "Sensors", "fr": "Capteurs" } }
+          ]
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        },
+        {
+          "key": "consumable",
+          "type": "string",
+          "label": { "en": "Consumable", "fr": "Consommable" }
+        },
+        {
+          "key": "percent",
+          "type": "number",
+          "label": { "en": "Remaining (%)", "fr": "Restant (%)" }
+        }
+      ]
+    },
+    {
+      "key": "state_changed",
+      "label": { "en": "State changed", "fr": "Changement d'état" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ],
+      "variables": [
+        {
+          "key": "device_name",
+          "type": "string",
+          "label": { "en": "Robot name", "fr": "Nom du robot" }
+        },
+        { "key": "state", "type": "string", "label": { "en": "State", "fr": "État" } },
+        {
+          "key": "state_code",
+          "type": "number",
+          "label": { "en": "State code", "fr": "Code d'état" }
+        }
+      ]
+    }
+  ],
+  "scene_actions": [
+    {
+      "key": "start_cleaning",
+      "label": { "en": "Start cleaning", "fr": "Démarrer le nettoyage" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ]
+    },
+    {
+      "key": "clean_rooms",
+      "label": { "en": "Clean rooms", "fr": "Nettoyer des pièces" },
+      "description": {
+        "en": "Comma-separated room names, e.g. \"Kitchen, Living room\".",
+        "fr": "Noms de pièces séparés par des virgules, ex. « Cuisine, Salon »."
+      },
+      "timeout_seconds": 60,
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        },
+        {
+          "key": "rooms",
+          "type": "string",
+          "required": true,
+          "label": { "en": "Rooms", "fr": "Pièces" },
+          "placeholder": { "en": "Kitchen, Living room", "fr": "Cuisine, Salon" }
+        }
+      ]
+    },
+    {
+      "key": "pause_cleaning",
+      "label": { "en": "Pause", "fr": "Mettre en pause" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ]
+    },
+    {
+      "key": "stop_cleaning",
+      "label": { "en": "Stop", "fr": "Arrêter" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ]
+    },
+    {
+      "key": "return_to_dock",
+      "label": { "en": "Return to dock", "fr": "Retour à la base" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        }
+      ]
+    },
+    {
+      "key": "set_fan_power",
+      "label": { "en": "Set suction power", "fr": "Régler la puissance d'aspiration" },
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        },
+        {
+          "key": "mode",
+          "type": "select",
+          "required": true,
+          "label": { "en": "Power", "fr": "Puissance" },
+          "options": [
+            { "value": "quiet", "label": { "en": "Quiet", "fr": "Silencieux" } },
+            { "value": "balanced", "label": { "en": "Balanced", "fr": "Équilibré" } },
+            { "value": "turbo", "label": { "en": "Turbo", "fr": "Turbo" } },
+            { "value": "max", "label": { "en": "Max", "fr": "Max" } }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "run_routine",
+      "label": { "en": "Run a routine", "fr": "Lancer une routine" },
+      "description": {
+        "en": "Routine name as shown in the Roborock app.",
+        "fr": "Nom de la routine tel qu'affiché dans l'application Roborock."
+      },
+      "timeout_seconds": 60,
+      "fields": [
+        {
+          "key": "vacuum",
+          "type": "select",
+          "source": "devices",
+          "required": true,
+          "label": { "en": "Vacuum", "fr": "Aspirateur" }
+        },
+        {
+          "key": "routine",
+          "type": "string",
+          "required": true,
+          "label": { "en": "Routine", "fr": "Routine" },
+          "placeholder": { "en": "After lunch", "fr": "Après les repas" }
+        }
+      ]
     }
   ]
 }

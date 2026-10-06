@@ -14,11 +14,13 @@
 
 import { createLogger } from '@gladysassistant/integration-sdk';
 
-import { ROBOROCK_METHOD } from '../constants.js';
+import { ROBOROCK_MESSAGE_PROTOCOL, ROBOROCK_METHOD } from '../constants.js';
 import { RoborockLocalTransport } from './localTransport.js';
 import { RoborockMqttTransport } from './mqttTransport.js';
 import { RoborockRestClient } from './restClient.js';
-import { normalizeRoomMappings } from './rooms.js';
+import { attachRoomNames, normalizeRoomMappings } from './rooms.js';
+import { buildMapSecurity, decodeMapFrame } from './map.js';
+import { parseRRMap } from './mapParser.js';
 
 const logger = createLogger({ name: 'roborock:client' });
 
@@ -272,6 +274,19 @@ export class RoborockAccountClient {
   }
 
   /**
+   * Fetch the cleaning history summary of one robot.
+   *
+   * Roborock returns the most recent cleaning start timestamps in `records`.
+   * Support varies by model, so callers must treat this RPC as optional.
+   *
+   * @param {string} duid the device id
+   * @returns {Promise<object|Array>} the get_clean_summary result
+   */
+  async getCleanSummary(duid) {
+    return this.#execute(duid, ROBOROCK_METHOD.GET_CLEAN_SUMMARY, []);
+  }
+
+  /**
    * Forward an RPC command to one robot.
    * @param {string} duid the device id
    * @param {string} method the Roborock method
@@ -280,6 +295,141 @@ export class RoborockAccountClient {
    */
   async sendCommand(duid, method, params = []) {
     return this.#execute(duid, method, params);
+  }
+
+  /**
+   * EXPERIMENTAL (milestone 1): fetch the RAW map of a robot.
+   *
+   * get_map_v1 is answered with a bare RPC (102) ack; the real map is PUSHED
+   * back as a separate protocol-301 frame. This arms a one-shot 301 waiter,
+   * sends get_map_v1 with the required `security` object, then decodes the four
+   * layers of the frame (see src/roborock/map.js). It does NOT parse the RRMap
+   * blob yet — it returns the raw bytes and rich diagnostics so the format of a
+   * specific model (e.g. the QV 35A / roborock.vacuum.a168) can be confirmed on a
+   * real device before any renderer is written.
+   *
+   * Local transport is tried first (TCP), then the cloud (MQTT), like every
+   * other command. No secret (token, localKey, rriot, nonce) is ever returned.
+   * @param {string} duid the device id
+   * @param {object} [options] options
+   * @param {number} [options.timeoutMs] how long to wait for the 301 push
+   * @returns {Promise<object>} the raw map + diagnostics
+   */
+  async getRawMap(duid, { timeoutMs = 10000 } = {}) {
+    const { rriot } = this.rest;
+    if (!rriot || !rriot.k) {
+      throw new Error('Not logged in: rriot credentials are required to request a map');
+    }
+    // The cloud transport may be absent if a previous login was interrupted
+    // (e.g. a transient DNS failure at boot): the session token is still valid,
+    // so re-run the silent login to (re)create the MQTT transport before using it.
+    if (!this.mqtt) {
+      await this.login();
+    }
+    const security = buildMapSecurity(rriot.k);
+    const attempts = [];
+
+    const local = await this.#getLocalTransport(duid);
+    if (local) {
+      const attempt = await this.#fetchMapOnce(duid, security, 'local', {
+        arm: () => local.armRawFrame(ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE, timeoutMs),
+        send: () => local.request(ROBOROCK_METHOD.GET_MAP_V1, [], security.payload),
+      });
+      attempts.push(attempt);
+      if (attempt.ok) {
+        this.lastTransport.set(duid, 'local');
+        return { ...attempt, attempts };
+      }
+      logger.warn(`Local map request failed for ${duid}, falling back to cloud: ${attempt.error}`);
+      this.#coolDownLocal(duid);
+    }
+
+    const attempt = await this.#fetchMapOnce(duid, security, 'cloud', {
+      arm: () => this.mqtt.armRawFrame(duid, ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE, timeoutMs),
+      send: () => this.mqtt.request(duid, ROBOROCK_METHOD.GET_MAP_V1, [], security.payload),
+    });
+    attempts.push(attempt);
+    if (attempt.ok) {
+      this.lastTransport.set(duid, 'cloud');
+    }
+    return { ...attempt, attempts };
+  }
+
+  /**
+   * Fetch and PARSE the map of a robot into a structured object (segments, robot
+   * and dock position, path, no-go areas, virtual walls). This is the target
+   * high-level API; getRawMap() stays for byte-level diagnostics.
+   * @param {string} duid the device id
+   * @param {object} [options] options forwarded to getRawMap
+   * @returns {Promise<object>} the parsed map (see src/roborock/mapParser.js)
+   */
+  async getMap(duid, options = {}) {
+    const raw = await this.getRawMap(duid, options);
+    if (!raw.ok) {
+      const error = new Error(`Map retrieval failed (${raw.transport}): ${raw.error}`);
+      error.raw = raw;
+      throw error;
+    }
+    const map = parseRRMap(raw.decoded.decompressed, { includePixels: options.includePixels });
+    // Reconcile the image segments with get_room_mapping (loaded at discovery),
+    // so each segment carries its room name when the account named it.
+    const robot = this.devices.find((device) => device.duid === duid);
+    map.segments = attachRoomNames(map.segments, robot ? robot.rooms : []);
+    map.namedSegmentCount = map.segments.filter((segment) => segment.named).length;
+    return map;
+  }
+
+  async #fetchMapOnce(duid, security, transport, { arm, send }) {
+    // Arm the 301 waiter BEFORE sending, so a fast push cannot be missed.
+    const framePromise = arm();
+    // Mark the promise as handled right away: it is only awaited AFTER `send()`
+    // resolves, so a waiter timeout (or #onClose rejecting the rawWaiters) while
+    // the 102 ack is still pending would otherwise be an unhandledRejection and
+    // crash the process. The rejection is still delivered to the `await` below.
+    framePromise.catch(() => {});
+    let ack = null;
+    let ackError = null;
+    try {
+      ack = await send();
+    } catch (err) {
+      // The ack is only informative; the map rides the 301 push, not the ack.
+      ackError = err.message;
+    }
+
+    let frame;
+    try {
+      frame = await framePromise;
+    } catch (err) {
+      return {
+        ok: false,
+        transport,
+        ack,
+        ackError,
+        frame: null,
+        layer1: null,
+        decoded: null,
+        endpoint: security.endpoint,
+        error: err.message,
+      };
+    }
+
+    const decoded = decodeMapFrame(frame.payload, security);
+    return {
+      ok: decoded.ok,
+      transport,
+      ack,
+      ackError,
+      frame: {
+        protocol: frame.protocol,
+        timestamp: frame.timestamp,
+        payloadLength: frame.payload.length,
+        decryptError: frame.decryptError ? frame.decryptError.message : null,
+      },
+      layer1: frame.payload, // raw layer-1-decrypted bytes, for saving/analysis
+      decoded,
+      endpoint: security.endpoint,
+      error: decoded.ok ? null : decoded.error,
+    };
   }
 
   /**

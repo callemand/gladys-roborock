@@ -39,6 +39,7 @@ test('convertDevice builds the Gladys discovered device for a robot', () => {
       'side-brush',
       'filter',
       'sensor-cleaning',
+      'last-clean-start',
     ],
   );
   // Each feature carries a unique selector equal to its external_id.
@@ -74,7 +75,7 @@ test('convertDevice adds one push button per Roborock routine', () => {
     ],
   });
 
-  const routines = device.features.slice(9);
+  const routines = device.features.filter((feature) => feature.external_id.includes(':routine-'));
   assert.deepEqual(
     routines.map(({ name, external_id, category, type }) => ({
       name,

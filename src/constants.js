@@ -106,6 +106,7 @@ export const ROBOROCK_LOCAL_PORT = Number(process.env.ROBOROCK_LOCAL_PORT) || 58
 export const ROBOROCK_METHOD = {
   GET_STATUS: 'get_status',
   GET_CONSUMABLE: 'get_consumable',
+  GET_CLEAN_SUMMARY: 'get_clean_summary',
   APP_START: 'app_start',
   APP_STOP: 'app_stop',
   APP_PAUSE: 'app_pause',
@@ -115,6 +116,7 @@ export const ROBOROCK_METHOD = {
   GET_FAN_POWER: 'get_custom_mode',
   GET_ROOM_MAPPING: 'get_room_mapping',
   GET_NETWORK_INFO: 'get_network_info',
+  GET_MAP_V1: 'get_map_v1',
 };
 
 // --- Roborock state codes (RoborockStateCode) --------------------------------
@@ -207,6 +209,7 @@ export const FEATURE_CODES = {
   CLEAN_MODE: 'clean-mode',
   DOCK: 'dock',
   BATTERY: 'battery',
+  LAST_CLEAN_START: 'last-clean-start',
   MAIN_BRUSH: 'main-brush',
   SIDE_BRUSH: 'side-brush',
   FILTER: 'filter',

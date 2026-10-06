@@ -66,3 +66,27 @@ export function normalizeRoomMappings(response, homeRooms = []) {
 
   return rooms;
 }
+
+/**
+ * Attach the human-readable room name to each parsed map segment.
+ *
+ * The IMAGE block of the map carries segment ids as pixel values; get_room_mapping
+ * (already normalized to `{ id, name }` by normalizeRoomMappings) pairs those same
+ * segment ids with their IoT room name. A segment with no match is a real map
+ * segment the account did not name (a hallway, an auto-split area): it is kept,
+ * flagged `named: false`, rather than dropped.
+ * @param {Array<object>} segments the parsed map segments (`{ segmentId, ... }`)
+ * @param {Array<{id: number, name: string}>} rooms the normalized room mappings
+ * @returns {Array<object>} the segments, each with `roomName` and `named`
+ */
+export function attachRoomNames(segments = [], rooms = []) {
+  const nameBySegmentId = new Map(
+    rooms
+      .filter((room) => room && room.id !== undefined && room.id !== null)
+      .map((room) => [Number(room.id), room.name]),
+  );
+  return segments.map((segment) => {
+    const roomName = nameBySegmentId.get(Number(segment.segmentId));
+    return { ...segment, roomName: roomName ?? null, named: roomName !== undefined };
+  });
+}

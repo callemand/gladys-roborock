@@ -1,6 +1,6 @@
 {
   "name": "gladys-roborock",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": true,
   "description": "Gladys Assistant integration for Roborock app robot vacuums",
   "type": "module",
@@ -16,7 +16,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@gladysassistant/integration-sdk": "^0.12.0",
+    "@gladysassistant/integration-sdk": "^0.14.0",
     "mqtt": "^5.15.2"
   },
   "devDependencies": {

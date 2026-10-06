@@ -296,6 +296,40 @@ function remainingPercent(consumed, lifetime) {
 }
 
 /**
+ * Remaining life of a consumable as a percentage, or null when unknown.
+ * @param {*} consumed seconds of wear reported by the robot
+ * @param {number} lifetime the consumable lifetime in seconds
+ * @returns {number|null} 0-100 (rounded), or null when `consumed` is not a number
+ */
+export function consumableRemaining(consumed, lifetime) {
+  const value = toNumber(consumed);
+  return value === null ? null : remainingPercent(value, lifetime);
+}
+
+// Consumable -> (status field, lifetime). Single source for the Gladys features,
+// the widget status block and the `consumable_worn` scene trigger.
+const CONSUMABLE_FIELDS = {
+  mainBrush: ['main_brush_work_time', CONSUMABLE_LIFETIME.MAIN_BRUSH_SECONDS],
+  sideBrush: ['side_brush_work_time', CONSUMABLE_LIFETIME.SIDE_BRUSH_SECONDS],
+  filter: ['filter_work_time', CONSUMABLE_LIFETIME.FILTER_SECONDS],
+  sensor: ['sensor_dirty_time', CONSUMABLE_LIFETIME.SENSOR_SECONDS],
+};
+
+/**
+ * Remaining life of every tracked consumable, in percent (null when unknown).
+ * @param {object} consumable the get_consumable result
+ * @returns {{ mainBrush: number|null, sideBrush: number|null, filter: number|null, sensor: number|null }}
+ */
+export function consumablePercents(consumable) {
+  const value = consumable || {};
+  const percents = {};
+  for (const [name, [field, lifetime]] of Object.entries(CONSUMABLE_FIELDS)) {
+    percents[name] = consumableRemaining(value[field], lifetime);
+  }
+  return percents;
+}
+
+/**
  * Convert robot maintenance counters returned by get_consumable to percentages.
  * Missing values are ignored so older models stay compatible.
  * @param {object} ids external ids of the Gladys robot
