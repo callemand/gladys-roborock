@@ -18,7 +18,7 @@ import { ROBOROCK_MESSAGE_PROTOCOL, ROBOROCK_METHOD } from '../constants.js';
 import { RoborockLocalTransport } from './localTransport.js';
 import { RoborockMqttTransport } from './mqttTransport.js';
 import { RoborockRestClient } from './restClient.js';
-import { attachRoomNames, normalizeRoomMappings } from './rooms.js';
+import { attachRoomNames, normalizeRoomMappings, unnamedIotIds } from './rooms.js';
 import { buildMapSecurity, decodeMapFrame } from './map.js';
 import { parseRRMap } from './mapParser.js';
 
@@ -234,12 +234,38 @@ export class RoborockAccountClient {
     });
     await this.mqtt.connect();
 
+    const sharedDuids = new Set((homeData.receivedDevices || []).map((d) => String(d.duid)));
+    const homeRooms = homeData.rooms || [];
+    let fetchedHomeRooms = null; // fetched once, only if a name is missing
+    const roomsFor = (duid) => {
+      if (sharedDuids.has(duid)) {
+        // a shared robot's rooms belong to its owner's home
+        return this.rest.getSharedDeviceRooms(duid);
+      }
+      fetchedHomeRooms = fetchedHomeRooms || this.rest.getRooms(homeId);
+      return fetchedHomeRooms;
+    };
+
     await Promise.all(
       this.devices.map(async (device) => {
         try {
           const mapping = await this.#execute(device.duid, ROBOROCK_METHOD.GET_ROOM_MAPPING, []);
 
-          device.rooms = normalizeRoomMappings(mapping, homeData.rooms || []);
+          let rooms = homeRooms;
+          if (unnamedIotIds(mapping, rooms).length > 0) {
+            // HomeData does not always name every room (issue #5): the room list
+            // has its own endpoint, as python-roborock does
+            try {
+              rooms = [...homeRooms, ...(await roomsFor(device.duid))];
+            } catch (err) {
+              logger.warn(`Could not load the room names for ${device.duid}: ${err.message}`);
+            }
+            const unnamed = unnamedIotIds(mapping, rooms);
+            if (unnamed.length > 0) {
+              logger.warn(`No name known for the room(s) ${unnamed.join(', ')} of ${device.duid}`);
+            }
+          }
+          device.rooms = normalizeRoomMappings(mapping, rooms);
         } catch (err) {
           // Certains anciens modèles ne fournissent aucune correspondance de pièce.
           // Le robot reste découvert, simplement sans le sélecteur.

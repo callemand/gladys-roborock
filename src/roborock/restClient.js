@@ -240,6 +240,38 @@ export class RoborockRestClient {
   }
 
   /**
+   * Fetch the rooms of a home. HomeData carries them too, but not always all of
+   * them: a room named in the app can be missing there (issue #5).
+   * @param {number} homeId the account home id
+   * @returns {Promise<Array<{id: number, name: string}>>} the rooms
+   */
+  async getRooms(homeId) {
+    this.#assertLoggedIn();
+    return this.#roomList(await this.#hawkRequest(`/user/homes/${homeId}/rooms`));
+  }
+
+  /**
+   * Fetch the rooms of a robot shared with this account: they belong to the
+   * owner's home, so the account's own HomeData does not carry them.
+   * @param {string} deviceId the Roborock device id
+   * @returns {Promise<Array<{id: number, name: string}>>} the rooms
+   */
+  async getSharedDeviceRooms(deviceId) {
+    this.#assertLoggedIn();
+    const path = `/user/deviceshare/query/${encodeURIComponent(deviceId)}/rooms`;
+    return this.#roomList(await this.#hawkRequest(path));
+  }
+
+  #roomList(response) {
+    if (!response || response.success !== true || !Array.isArray(response.result)) {
+      throw new Error('Roborock get rooms failed: unexpected response');
+    }
+    return response.result
+      .map((room) => ({ id: room && (room.id ?? room.roomId), name: room && room.name }))
+      .filter((room) => room.id !== undefined && room.id !== null && room.name);
+  }
+
+  /**
    * Fetch the routines (called scenes by the Roborock API) of a robot.
    * @param {string} deviceId the Roborock device id
    * @returns {Promise<Array<{id: number, name: string}>>} the routines
