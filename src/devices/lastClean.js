@@ -93,3 +93,60 @@ export function buildLastCleanStartState(ids, timestamp) {
     state: timestamp,
   };
 }
+
+/**
+ * Build the read-only Gladys feature answering "did the vacuum run today?".
+ *
+ * A 0/1 numeric (1 = cleaned today) so a scene can use it as a condition — same
+ * UNKNOWN category/type rationale as the timestamp feature above.
+ * @param {object} ids external-id factory of the vacuum
+ * @returns {object} Gladys feature
+ */
+export function buildCleanedTodayFeature(ids) {
+  return {
+    name: 'Cleaned today',
+    external_id: ids.feature(FEATURE_CODES.CLEANED_TODAY),
+    category: DEVICE_FEATURE_CATEGORIES.UNKNOWN,
+    type: DEVICE_FEATURE_TYPES.UNKNOWN.UNKNOWN,
+    read_only: true,
+    has_feedback: true,
+    keep_history: true,
+    min: 0,
+    max: 1,
+  };
+}
+
+/**
+ * Whether a cleaning-start timestamp falls on the current calendar day (local
+ * time zone of the process).
+ * @param {number|null} timestamp the last cleaning start, Unix seconds
+ * @param {number} [now] current time in ms (for testing)
+ * @returns {boolean} true when the last cleaning started today
+ */
+export function isCleanedToday(timestamp, now = Date.now()) {
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) {
+    return false;
+  }
+  const date = new Date(timestamp * 1000);
+  const ref = new Date(now);
+  return (
+    date.getFullYear() === ref.getFullYear() &&
+    date.getMonth() === ref.getMonth() &&
+    date.getDate() === ref.getDate()
+  );
+}
+
+/**
+ * Build the "Cleaned today" state (always resolved, 0 or 1) from the last
+ * cleaning start, so a scene condition can test both "yes" and "no".
+ * @param {object} ids external-id factory of the vacuum
+ * @param {number|null} timestamp the last cleaning start, Unix seconds
+ * @param {number} [now] current time in ms (for testing)
+ * @returns {object} Gladys state
+ */
+export function buildCleanedTodayState(ids, timestamp, now = Date.now()) {
+  return {
+    device_feature_external_id: ids.feature(FEATURE_CODES.CLEANED_TODAY),
+    state: isCleanedToday(timestamp, now) ? 1 : 0,
+  };
+}

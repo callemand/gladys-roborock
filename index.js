@@ -20,6 +20,8 @@
 // The SDK reads them automatically: `new GladysIntegration()` is enough.
 // -----------------------------------------------------------------------------
 
+import { createHash } from 'node:crypto';
+
 import { GladysIntegration, logger } from '@gladysassistant/integration-sdk';
 
 import {
@@ -44,7 +46,11 @@ import {
   consumablePercents,
   routineIdFromFeatureCode,
 } from './src/devices/vacuum.js';
-import { buildLastCleanStartState, extractLastCleanStart } from './src/devices/lastClean.js';
+import {
+  buildCleanedTodayState,
+  buildLastCleanStartState,
+  extractLastCleanStart,
+} from './src/devices/lastClean.js';
 import { computeSceneEvents, snapshotFromStatus } from './src/devices/sceneTriggers.js';
 import {
   FAN_POWER_MODES,
@@ -103,6 +109,10 @@ const initializedRoomSelectors = new Set();
 // cache : aucun événement n'est émis au démarrage de l'intégration.
 const sceneSnapshots = new Map();
 
+// Robots with a cleaning session in progress: the map widget is refreshed faster
+// (and cached more briefly) for them, so the map is near real-time while cleaning.
+const cleaningDuids = new Set();
+
 /**
  * Detect the robot transitions since the last poll and fire the matching scene
  * triggers. Never throws: a trigger failure must not break the poll.
@@ -124,6 +134,12 @@ async function publishSceneTriggers(device, duid, status, consumable) {
     });
     for (const event of events) {
       await gladys.publishSceneEvent(event.key, event.data);
+    }
+
+    if (snapshot.sessionActive) {
+      cleaningDuids.add(duid);
+    } else {
+      cleaningDuids.delete(duid);
     }
   } catch (err) {
     logger.warn(`Could not publish scene triggers for ${duid}: ${err.message}`);
@@ -585,6 +601,10 @@ gladys.onPoll(async (device) => {
       states.push(lastCleanState);
     }
 
+    // "Cleaned today" (0/1): a scene condition can check whether the vacuum ran
+    // today. Always published (even 0) so both branches of the condition work.
+    states.push(buildCleanedTodayState(ids, lastCleanStart));
+
     const robot = roborock.listDevices().find((candidate) => candidate.duid === duid);
     const roomSelectionFeedback = buildRoomSelectionFeedback(
       duid,
@@ -628,12 +648,24 @@ function cacheMapImage(key, base64) {
 // waiters (AES "bad decrypt"). A single in-flight request is shared, and its
 // result is reused for a short window.
 const MAP_RENDER_TTL_MS = 60 * 1000;
-const mapRenderCache = new Map(); // duid -> { at, map, base64 }
-const mapRenderInFlight = new Map(); // duid -> Promise<{ map, base64 }>
+// While a cleaning session is active the map is cached only briefly, so the live
+// refresh nudge (see below) actually produces an up-to-date render each time.
+const MAP_RENDER_TTL_ACTIVE_MS = 8 * 1000;
+// How often to nudge a refresh of open map widgets while a robot is cleaning.
+const MAP_LIVE_REFRESH_MS = 15 * 1000;
+const mapRenderCache = new Map(); // duid -> { at, map, base64, imageKey }
+const mapRenderInFlight = new Map(); // duid -> Promise<{ map, base64, imageKey }>
+
+// Short, stable marker of the rendered image: the image key changes (and the core
+// swaps the <img>) only when these bytes change, so an unchanged map never flashes.
+function mapSignature(base64) {
+  return createHash('sha1').update(base64).digest('hex').slice(0, 10);
+}
 
 async function renderMapForDuid(duid) {
+  const ttl = cleaningDuids.has(duid) ? MAP_RENDER_TTL_ACTIVE_MS : MAP_RENDER_TTL_MS;
   const cached = mapRenderCache.get(duid);
-  if (cached && Date.now() - cached.at < MAP_RENDER_TTL_MS) {
+  if (cached && Date.now() - cached.at < ttl) {
     return cached;
   }
   const pending = mapRenderInFlight.get(duid);
@@ -645,7 +677,10 @@ async function renderMapForDuid(duid) {
       throw new Error('The Roborock account is not linked yet');
     }
     const map = await roborock.getMap(duid, { includePixels: true });
-    const entry = { at: Date.now(), map, base64: renderMapPngBase64(map) };
+    const base64 = renderMapPngBase64(map);
+    const imageKey = mapImageKey(duid, mapSignature(base64));
+    cacheMapImage(imageKey, base64);
+    const entry = { at: Date.now(), map, base64, imageKey };
     mapRenderCache.set(duid, entry);
     return entry;
   })();
@@ -657,6 +692,23 @@ async function renderMapForDuid(duid) {
   }
 }
 
+// Near real-time map while cleaning: drop the cached widget content so every open
+// map widget re-pulls (and re-renders) on a short cadence. The core rate-limits
+// requestWidgetRefresh to 1/10s, and it is a no-op when no widget is open.
+const mapLiveRefresh = setInterval(() => {
+  if (cleaningDuids.size === 0) {
+    return;
+  }
+  try {
+    gladys.requestWidgetRefresh(MAP_WIDGET_KEY);
+  } catch (err) {
+    logger.warn(`Map live refresh nudge failed: ${err.message}`);
+  }
+}, MAP_LIVE_REFRESH_MS);
+if (typeof mapLiveRefresh.unref === 'function') {
+  mapLiveRefresh.unref();
+}
+
 gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
   const vacuumExternalId = settings && settings.vacuum;
   if (!vacuumExternalId) {
@@ -664,8 +716,7 @@ gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
   }
   const { duid } = parseExternalId(vacuumExternalId);
   logger.info(`onWidgetGet(map) <- ${duid}`);
-  const { map, base64 } = await renderMapForDuid(duid);
-  const imageKey = mapImageKey(duid, map.mapSequence);
+  const { map, base64, imageKey } = await renderMapForDuid(duid);
   cacheMapImage(imageKey, base64);
   // The map image is ready; gather the live numbers for the tiles / status block.
   const [status, consumables] = await Promise.all([

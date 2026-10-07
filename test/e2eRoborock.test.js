@@ -362,6 +362,7 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
         'room',
         `routine-${ROUTINE_ID}`,
         'last-clean-start',
+        'cleaned-today',
       ],
     );
     // every room by its name, including the one HomeData did not name
@@ -435,6 +436,8 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
         device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:last-clean-start`,
         state: 1786961500,
       },
+      // the fixed sample timestamp is not the current day -> cleaned today = 0
+      { device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:cleaned-today`, state: 0 },
       // no room cleaning in progress: the room selector shows none
       { device_feature_external_id: `ext:${SELECTOR}:vacuum:${DUID}:room`, text: 'none' },
     ]);

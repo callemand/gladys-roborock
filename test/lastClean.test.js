@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { buildLastCleanStartState, extractLastCleanStart } from '../src/devices/lastClean.js';
+import {
+  buildCleanedTodayState,
+  buildLastCleanStartState,
+  extractLastCleanStart,
+  isCleanedToday,
+} from '../src/devices/lastClean.js';
 
 describe('Roborock last cleaning', () => {
   it('extracts the latest start timestamp from a QV 35A clean summary', () => {
@@ -60,5 +65,35 @@ describe('Roborock last cleaning', () => {
     };
 
     assert.equal(buildLastCleanStartState(ids, null), null);
+  });
+
+  it('tells whether the vacuum ran today', () => {
+    const now = new Date(2026, 9, 6, 20, 0, 0).getTime(); // 6 Oct 2026, local
+    const earlierToday = Math.floor(new Date(2026, 9, 6, 8, 15, 0).getTime() / 1000);
+    const yesterday = Math.floor(new Date(2026, 9, 5, 23, 59, 0).getTime() / 1000);
+
+    assert.equal(isCleanedToday(earlierToday, now), true);
+    assert.equal(isCleanedToday(yesterday, now), false);
+    assert.equal(isCleanedToday(null, now), false);
+    assert.equal(isCleanedToday(0, now), false);
+  });
+
+  it('builds a 0/1 "cleaned today" state usable as a scene condition', () => {
+    const ids = {
+      feature(code) {
+        return `ext:test:vacuum:robot:${code}`;
+      },
+    };
+    const now = new Date(2026, 9, 6, 20, 0, 0).getTime();
+    const earlierToday = Math.floor(new Date(2026, 9, 6, 8, 15, 0).getTime() / 1000);
+    const yesterday = Math.floor(new Date(2026, 9, 5, 12, 0, 0).getTime() / 1000);
+
+    assert.deepEqual(buildCleanedTodayState(ids, earlierToday, now), {
+      device_feature_external_id: 'ext:test:vacuum:robot:cleaned-today',
+      state: 1,
+    });
+    assert.equal(buildCleanedTodayState(ids, yesterday, now).state, 0);
+    // Always resolved, even with no history, so the "no" branch works too.
+    assert.equal(buildCleanedTodayState(ids, null, now).state, 0);
   });
 });

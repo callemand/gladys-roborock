@@ -210,6 +210,7 @@ export const FEATURE_CODES = {
   DOCK: 'dock',
   BATTERY: 'battery',
   LAST_CLEAN_START: 'last-clean-start',
+  CLEANED_TODAY: 'cleaned-today',
   MAIN_BRUSH: 'main-brush',
   SIDE_BRUSH: 'side-brush',
   FILTER: 'filter',
