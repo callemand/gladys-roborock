@@ -35,6 +35,16 @@ test('the form asks for nothing: everything happens through the actions', () => 
   });
 });
 
+test('both transports are declared, and the local preference is honored', () => {
+  // The store tags the integration Local and Cloud from this field, and Gladys
+  // renders its "Prefer the local connection" toggle only when both are there.
+  assert.deepEqual([...manifest.transports].sort(), ['cloud', 'local']);
+  assert.ok(
+    indexSource.includes('GLADYS_PREFER_LOCAL'),
+    'the toggle Gladys renders for a dual-transport integration must be read',
+  );
+});
+
 test('the session keys stay OUT of the config_schema', () => {
   // They are integration-managed state persisted through setConfig(). Declaring
   // one would render it as a form field, and the server would then refuse the

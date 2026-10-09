@@ -9,7 +9,8 @@
 // The account is linked once from the credentials the user saved, then the
 // session (token + rriot credentials) is persisted and reused silently. Commands
 // prefer the LOCAL transport (TCP) when the robot's LAN IP is known, and fall
-// back to the cloud (MQTT).
+// back to the cloud (MQTT). When the user turns off "Prefer the local
+// connection" in Gladys, the order is reversed.
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
@@ -60,9 +61,12 @@ export class RoborockAccountClient {
    * @param {object} [options] options
    * @param {Function} [options.onCloudStatus] called with 'connected' or
    *   'unauthorized' as the cloud (MQTT) connection comes and goes
+   * @param {boolean} [options.preferLocal] false to send RPCs through the cloud
+   *   first (the Gladys "Prefer the local connection" toggle); defaults to true
    */
-  constructor(session = {}, { onCloudStatus = () => {} } = {}) {
+  constructor(session = {}, { onCloudStatus = () => {}, preferLocal = true } = {}) {
     this.onCloudStatus = onCloudStatus;
+    this.preferLocal = preferLocal;
     this.rest = new RoborockRestClient(session);
     this.mqtt = null;
     this.devices = [];
@@ -341,7 +345,8 @@ export class RoborockAccountClient {
    * real device before any renderer is written.
    *
    * Local transport is tried first (TCP), then the cloud (MQTT), like every
-   * other command. No secret (token, localKey, rriot, nonce) is ever returned.
+   * other command — the other way round when the user prefers the cloud. No
+   * secret (token, localKey, rriot, nonce) is ever returned.
    * @param {string} duid the device id
    * @param {object} [options] options
    * @param {number} [options.timeoutMs] how long to wait for the 301 push
@@ -360,31 +365,39 @@ export class RoborockAccountClient {
     }
     const security = buildMapSecurity(rriot.k);
     const attempts = [];
+    const order = this.preferLocal ? ['local', 'cloud'] : ['cloud', 'local'];
 
-    const local = await this.#getLocalTransport(duid);
-    if (local) {
-      const attempt = await this.#fetchMapOnce(duid, security, 'local', {
-        arm: () => local.armRawFrame(ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE, timeoutMs),
-        send: () => local.request(ROBOROCK_METHOD.GET_MAP_V1, [], security.payload),
+    for (const transport of order) {
+      const channel = transport === 'local' ? await this.#getLocalTransport(duid) : null;
+      if (transport === 'local' && !channel) {
+        continue;
+      }
+      const attempt = await this.#fetchMapOnce(duid, security, transport, {
+        arm: () =>
+          channel
+            ? channel.armRawFrame(ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE, timeoutMs)
+            : this.mqtt.armRawFrame(duid, ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE, timeoutMs),
+        send: () =>
+          channel
+            ? channel.request(ROBOROCK_METHOD.GET_MAP_V1, [], security.payload)
+            : this.mqtt.request(duid, ROBOROCK_METHOD.GET_MAP_V1, [], security.payload),
       });
       attempts.push(attempt);
       if (attempt.ok) {
-        this.lastTransport.set(duid, 'local');
+        this.lastTransport.set(duid, transport);
         return { ...attempt, attempts };
       }
-      logger.warn(`Local map request failed for ${duid}, falling back to cloud: ${attempt.error}`);
-      this.#coolDownLocal(duid);
+      if (transport === 'local') {
+        this.#coolDownLocal(duid);
+      }
+      if (transport !== order[order.length - 1]) {
+        logger.warn(
+          `${transport} map request failed for ${duid}, trying the other transport: ${attempt.error}`,
+        );
+      }
     }
 
-    const attempt = await this.#fetchMapOnce(duid, security, 'cloud', {
-      arm: () => this.mqtt.armRawFrame(duid, ROBOROCK_MESSAGE_PROTOCOL.MAP_RESPONSE, timeoutMs),
-      send: () => this.mqtt.request(duid, ROBOROCK_METHOD.GET_MAP_V1, [], security.payload),
-    });
-    attempts.push(attempt);
-    if (attempt.ok) {
-      this.lastTransport.set(duid, 'cloud');
-    }
-    return { ...attempt, attempts };
+    return { ...attempts[attempts.length - 1], attempts };
   }
 
   /**
@@ -482,18 +495,47 @@ export class RoborockAccountClient {
     return this.lastTransport.get(duid) || null;
   }
 
+  /**
+   * Apply the user's "Prefer the local connection" choice to the next RPCs.
+   * @param {boolean} preferLocal false to go through the cloud first
+   */
+  setPreferLocal(preferLocal) {
+    this.preferLocal = preferLocal;
+  }
+
   async #execute(duid, method, params) {
+    if (!this.preferLocal) {
+      try {
+        return await this.#cloudRpc(duid, method, params);
+      } catch (e) {
+        const local = await this.#getLocalTransport(duid);
+        if (!local) {
+          throw e;
+        }
+        logger.warn(`Cloud request failed for ${duid}, falling back to local: ${e.message}`);
+        return this.#localRpc(local, duid, method, params);
+      }
+    }
+
     const local = await this.#getLocalTransport(duid);
     if (local) {
       try {
-        const result = await local.request(method, params);
-        this.lastTransport.set(duid, 'local');
-        return result;
+        return await this.#localRpc(local, duid, method, params);
       } catch (e) {
         logger.warn(`Local request failed for ${duid}, falling back to cloud: ${e.message}`);
         this.#coolDownLocal(duid);
       }
     }
+    return this.#cloudRpc(duid, method, params);
+  }
+
+  async #localRpc(local, duid, method, params) {
+    const result = await local.request(method, params);
+    this.lastTransport.set(duid, 'local');
+    return result;
+  }
+
+  async #cloudRpc(duid, method, params) {
     const result = await this.mqtt.request(duid, method, params);
     this.lastTransport.set(duid, 'cloud');
     return result;

@@ -93,7 +93,20 @@ let roborockEmail = null;
 let session = readSession();
 // whether the broker refusal was reported, so its recovery is reported too
 let cloudRefused = false;
+// The one setting Gladys itself renders, because the manifest declares both
+// the local and the cloud transports: the reserved, read-only key
+// GLADYS_PREFER_LOCAL ("Prefer the local connection", true unless turned off).
+let preferLocal = true;
 let roborock = newRoborockClient(session);
+
+/**
+ * Read the user's transport preference from the integration config.
+ * @param {Record<string, unknown>} config the config returned by Gladys
+ * @returns {boolean} false only when the user turned the toggle off
+ */
+function readPreferLocal(config = {}) {
+  return config.GLADYS_PREFER_LOCAL !== false;
+}
 
 // Appareils pour lesquels un nettoyage par pièce vient d'être demandé.
 // `active` passe à true uniquement après avoir observé un état Roborock
@@ -340,7 +353,7 @@ async function reportStatus(connected, message) {
  * @returns {RoborockAccountClient} the client
  */
 function newRoborockClient(clientSession) {
-  return new RoborockAccountClient(clientSession, { onCloudStatus });
+  return new RoborockAccountClient(clientSession, { onCloudStatus, preferLocal });
 }
 
 /**
@@ -835,6 +848,9 @@ gladys.onAction('roborock_unlink', async () => {
 // all the same: a config-updated is cheap to ignore, and reconnecting on one
 // would drop a working session for nothing.
 gladys.onConfigUpdated(async (newConfig) => {
+  // The transport preference applies to the next RPC: no reconnection needed.
+  preferLocal = readPreferLocal(newConfig);
+  roborock.setPreferLocal(preferLocal);
   const updated = readSession(newConfig);
   if (sameSession(updated, session)) {
     return;
@@ -857,6 +873,7 @@ gladys.on('connected', async () => {
     const rawConfig = await gladys.getConfig();
     roborockEmail = rawConfig[EMAIL_KEY] || null;
     session = readSession(rawConfig);
+    preferLocal = readPreferLocal(rawConfig);
     if (await connect()) {
       await publishDevices();
     }

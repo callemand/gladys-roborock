@@ -1,9 +1,7 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "categories": [
-    "appliances"
-  ],
+  "categories": ["appliances"],
   "name": "Roborock",
   "description": {
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery and routines.",
@@ -13,6 +11,7 @@
   "docker_image": "ghcr.io/callemand/gladys-roborock:2.5.1",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
+  "transports": ["local", "cloud"],
   "config_schema": [
     {
       "key": "roborock_account",
