@@ -34,6 +34,10 @@ Built on the JavaScript SDK
 - **Talks to each robot over the LAN** (Roborock protocol on TCP 58867) and falls
   back to a cloud RPC over MQTT when the robot is not reachable locally. The
   transport in use is shown as a badge on the device.
+  The manifest declares both transports, so the store tags the integration
+  **Local** and **Cloud**, and Gladys adds its standard "Prefer the local (LAN)
+  connection" toggle: turned off, commands go through the cloud first and fall
+  back to the LAN.
 
 Each **robot** exposes these features:
 
