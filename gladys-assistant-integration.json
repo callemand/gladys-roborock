@@ -1,9 +1,7 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "categories": [
-    "appliances"
-  ],
+  "categories": ["appliances"],
   "name": "Roborock",
   "description": {
     "en": "Robot vacuums paired in the Roborock app: state, start/stop, fan power, dock, battery and routines.",
@@ -13,10 +11,7 @@
   "docker_image": "ghcr.io/callemand/gladys-roborock:2.6.0",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
-  "transports": [
-    "local",
-    "cloud"
-  ],
+  "transports": ["local", "cloud"],
   "config_schema": [
     {
       "key": "roborock_account",
@@ -100,7 +95,9 @@
       "key": "map",
       "label": {
         "en": "Vacuum",
-        "fr": "Aspirateur"
+        "fr": "Aspirateur",
+        "de": "Saugroboter",
+        "es": "Aspirador"
       },
       "icon": "wind",
       "settings": [
@@ -111,7 +108,9 @@
           "required": true,
           "label": {
             "en": "Vacuum",
-            "fr": "Aspirateur"
+            "fr": "Aspirateur",
+            "de": "Saugroboter",
+            "es": "Aspirador"
           }
         },
         {
@@ -120,63 +119,81 @@
           "default": "quiet",
           "label": {
             "en": "Action button 3",
-            "fr": "Bouton action 3"
+            "fr": "Bouton action 3",
+            "de": "Aktionstaste 3",
+            "es": "Botón de acción 3"
           },
           "options": [
             {
               "value": "none",
               "label": {
                 "en": "None",
-                "fr": "Aucun"
+                "fr": "Aucun",
+                "de": "Keine",
+                "es": "Ninguno"
               }
             },
             {
               "value": "start",
               "label": {
                 "en": "Start",
-                "fr": "Démarrer"
+                "fr": "Démarrer",
+                "de": "Start",
+                "es": "Iniciar"
               }
             },
             {
               "value": "stop",
               "label": {
                 "en": "Stop",
-                "fr": "Arrêter"
+                "fr": "Arrêter",
+                "de": "Stopp",
+                "es": "Detener"
               }
             },
             {
               "value": "dock",
               "label": {
                 "en": "Dock",
-                "fr": "Retour base"
+                "fr": "Retour base",
+                "de": "Zur Station",
+                "es": "A la base"
               }
             },
             {
               "value": "quiet",
               "label": {
                 "en": "Quiet",
-                "fr": "Silencieux"
+                "fr": "Silencieux",
+                "de": "Leise",
+                "es": "Silencioso"
               }
             },
             {
               "value": "balanced",
               "label": {
                 "en": "Balanced",
-                "fr": "Équilibré"
+                "fr": "Équilibré",
+                "de": "Standard",
+                "es": "Equilibrado"
               }
             },
             {
               "value": "turbo",
               "label": {
                 "en": "Turbo",
-                "fr": "Turbo"
+                "fr": "Turbo",
+                "de": "Turbo",
+                "es": "Turbo"
               }
             },
             {
               "value": "max",
               "label": {
                 "en": "Max",
-                "fr": "Max"
+                "fr": "Max",
+                "de": "Max",
+                "es": "Máx"
               }
             }
           ]
@@ -187,63 +204,81 @@
           "default": "turbo",
           "label": {
             "en": "Action button 4",
-            "fr": "Bouton action 4"
+            "fr": "Bouton action 4",
+            "de": "Aktionstaste 4",
+            "es": "Botón de acción 4"
           },
           "options": [
             {
               "value": "none",
               "label": {
                 "en": "None",
-                "fr": "Aucun"
+                "fr": "Aucun",
+                "de": "Keine",
+                "es": "Ninguno"
               }
             },
             {
               "value": "start",
               "label": {
                 "en": "Start",
-                "fr": "Démarrer"
+                "fr": "Démarrer",
+                "de": "Start",
+                "es": "Iniciar"
               }
             },
             {
               "value": "stop",
               "label": {
                 "en": "Stop",
-                "fr": "Arrêter"
+                "fr": "Arrêter",
+                "de": "Stopp",
+                "es": "Detener"
               }
             },
             {
               "value": "dock",
               "label": {
                 "en": "Dock",
-                "fr": "Retour base"
+                "fr": "Retour base",
+                "de": "Zur Station",
+                "es": "A la base"
               }
             },
             {
               "value": "quiet",
               "label": {
                 "en": "Quiet",
-                "fr": "Silencieux"
+                "fr": "Silencieux",
+                "de": "Leise",
+                "es": "Silencioso"
               }
             },
             {
               "value": "balanced",
               "label": {
                 "en": "Balanced",
-                "fr": "Équilibré"
+                "fr": "Équilibré",
+                "de": "Standard",
+                "es": "Equilibrado"
               }
             },
             {
               "value": "turbo",
               "label": {
                 "en": "Turbo",
-                "fr": "Turbo"
+                "fr": "Turbo",
+                "de": "Turbo",
+                "es": "Turbo"
               }
             },
             {
               "value": "max",
               "label": {
                 "en": "Max",
-                "fr": "Max"
+                "fr": "Max",
+                "de": "Max",
+                "es": "Máx"
               }
             }
           ]

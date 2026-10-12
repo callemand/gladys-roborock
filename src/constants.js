@@ -46,6 +46,11 @@ export const BATTERY_BOUNDS = { MIN: 0, MAX: 100 };
 export const CONSUMABLE_BOUNDS = { MIN: 0, MAX: 100 };
 export const ROOM_SELECTION_NONE = 'none';
 
+// The few raw Roborock state codes index.js reasons about by name.
+export const ROBOROCK_STATE = {
+  PAUSED: 10,
+};
+
 export const ROBOROCK_SEGMENT_CLEANING_STATES = new Set([
   18, // segment_cleaning
   6304, // segment_mopping
@@ -112,8 +117,12 @@ export const ROBOROCK_METHOD = {
   APP_PAUSE: 'app_pause',
   APP_CHARGE: 'app_charge',
   APP_SEGMENT_CLEAN: 'app_segment_clean',
+  RESUME_SEGMENT_CLEAN: 'resume_segment_clean',
   SET_FAN_POWER: 'set_custom_mode',
   GET_FAN_POWER: 'get_custom_mode',
+  // Sets suction + water flow (+ mop route) in one go: how the Roborock app
+  // switches between "Vacuum", "Vac & Mop" and "Mop" on mop-capable robots.
+  SET_CLEAN_MOTOR_MODE: 'set_clean_motor_mode',
   GET_ROOM_MAPPING: 'get_room_mapping',
   GET_NETWORK_INFO: 'get_network_info',
   GET_MAP_V1: 'get_map_v1',
@@ -200,6 +209,58 @@ export const FAN_POWER_TO_CLEAN_MODE = {
   ),
   106: VACUUM_CLEANER_CLEAN_MODE.AUTO, // auto, read-only (see above)
 };
+
+// --- Mop-capable robots: clean mode = Vacuum / Vac & Mop / Mop -------------
+// A robot whose status carries `water_box_mode` (S7, S8, Qrevo, Saros...) has
+// the app's three cleaning modes, which the table above cannot express: there
+// the Gladys clean mode maps to the MODE (issue #13), and the suction level is
+// a separate setting (widget buttons, `set_fan_power` scene action).
+//
+//   Gladys AUTO   -> Vac & Mop   (suction kept, water flow restored)
+//   Gladys VACUUM -> Vacuum only (water flow off)
+//   Gladys MOP    -> Mop only    (fan power 105 = "off" on these models)
+//
+// Codes from python-roborock (VacuumModes / WaterModes / CleanRoutes).
+export const ROBOROCK_FAN_POWER = {
+  QUIET: 101,
+  BALANCED: 102,
+  TURBO: 103,
+  MAX: 104,
+  OFF: 105, // "gentle" on the older models — see CLEAN_MODE_TO_FAN_POWER
+  CUSTOM: 106,
+  MAX_PLUS: 108,
+  SMART: 110,
+};
+// Suction levels that are kept as-is when the mode changes.
+export const ROBOROCK_SUCTION_LEVELS = new Set([
+  ROBOROCK_FAN_POWER.QUIET,
+  ROBOROCK_FAN_POWER.BALANCED,
+  ROBOROCK_FAN_POWER.TURBO,
+  ROBOROCK_FAN_POWER.MAX,
+  ROBOROCK_FAN_POWER.MAX_PLUS,
+]);
+export const ROBOROCK_WATER_BOX_MODE = {
+  OFF: 200,
+  STANDARD: 202, // the default when the robot never reported a water flow
+};
+export const ROBOROCK_MOP_ROUTE_STANDARD = 300;
+
+// Gladys clean modes published as `supported_options`, so the device card only
+// lists what the robot can really do. The core requires a label on each option;
+// the card still shows its own translation of the Gladys mode, the label is the
+// fallback (and what the mode really is on the robot).
+export const CLEAN_MODE_OPTIONS_MOP = [
+  { value: VACUUM_CLEANER_CLEAN_MODE.AUTO, label: 'Vac & Mop' },
+  { value: VACUUM_CLEANER_CLEAN_MODE.VACUUM, label: 'Vacuum' },
+  { value: VACUUM_CLEANER_CLEAN_MODE.MOP, label: 'Mop' },
+];
+export const CLEAN_MODE_OPTIONS_SUCTION = [
+  { value: VACUUM_CLEANER_CLEAN_MODE.AUTO, label: 'Balanced' },
+  { value: VACUUM_CLEANER_CLEAN_MODE.QUIET, label: 'Quiet' },
+  { value: VACUUM_CLEANER_CLEAN_MODE.LOW_NOISE, label: 'Gentle' },
+  { value: VACUUM_CLEANER_CLEAN_MODE.DEEP_CLEAN, label: 'Turbo' },
+  { value: VACUUM_CLEANER_CLEAN_MODE.VACUUM, label: 'Max' },
+];
 
 // Feature suffixes used in the feature external ids
 // (`ext:<selector>:vacuum:<duid>:<code>`).

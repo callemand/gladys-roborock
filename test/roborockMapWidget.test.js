@@ -5,6 +5,7 @@ import { validateWidgetContent } from '@gladysassistant/integration-sdk';
 
 import {
   MAP_WIDGET_KEY,
+  WIDGET_LANGUAGES,
   buildMapWidgetContent,
   duidFromImageKey,
   formatCleanTimestamp,
@@ -80,9 +81,13 @@ test('buildMapWidgetContent is accepted by the core validator', () => {
   // fixed start + fixed dock + the two configured actions
   const buttons = byType('button');
   assert.equal(buttons.length, 4);
-  assert.ok(buttons.every((b) => typeof b.device_feature === 'string' && 'value' in b));
-  assert.ok(buttons.some((b) => b.device_feature === `${v}:dock`)); // fixed dock
-  assert.ok(buttons.some((b) => b.device_feature === `${v}:clean-mode`)); // quiet
+  assert.ok(buttons.some((b) => b.device_feature === `${v}:dock` && b.value === 1)); // fixed dock
+  assert.ok(buttons.some((b) => b.device_feature === `${v}:run-mode` && b.value === 0)); // stop
+  // a suction level is a widget action, never the clean-mode feature (issue #13:
+  // on a mop-capable robot that feature is the Vacuum / Vac & Mop / Mop choice)
+  assert.ok(!buttons.some((b) => b.device_feature === `${v}:clean-mode`));
+  const quiet = buttons.find((b) => b.action);
+  assert.deepEqual(quiet.action, { key: 'fan_power', params: { level: 'quiet' } });
   // status block with the duration and every consumable percentage
   const status = byType('status')[0];
   assert.ok(status.items.some((i) => i.value === '38 min')); // 2280s -> 38 min
@@ -110,14 +115,58 @@ test('homeAreaM2 sums only the named segments', () => {
   assert.equal(homeAreaM2(SAMPLE_MAP), 27);
 });
 
-test('roborockStateLabel maps known states and falls back', () => {
-  assert.equal(roborockStateLabel(8), 'À la base');
-  assert.equal(roborockStateLabel(5), 'Nettoyage');
-  assert.equal(roborockStateLabel(9999), 'Inconnu');
+test('roborockStateLabel speaks the user language and falls back to English', () => {
+  assert.equal(roborockStateLabel(8, 'fr'), 'À la base');
+  assert.equal(roborockStateLabel(5, 'fr'), 'Nettoyage');
+  assert.equal(roborockStateLabel(5, 'de'), 'Reinigung');
+  assert.equal(roborockStateLabel(5, 'es'), 'Limpiando');
+  assert.equal(roborockStateLabel(5), 'Cleaning');
+  assert.equal(roborockStateLabel(5, 'it'), 'Cleaning');
+  assert.equal(roborockStateLabel(9999, 'de'), 'Unbekannt');
+  assert.equal(roborockStateLabel(9999, 'fr'), 'Inconnu');
 });
 
-test('formatCleanTimestamp says Aujourd’hui for the same day', () => {
+test('formatCleanTimestamp says today / yesterday in the user language', () => {
   const now = new Date(2026, 0, 2, 10, 0, 0).getTime();
   const ts = Math.floor(new Date(2026, 0, 2, 8, 12, 0).getTime() / 1000);
-  assert.equal(formatCleanTimestamp(ts, now), "Aujourd'hui, 08:12");
+  assert.equal(formatCleanTimestamp(ts, now, 'fr'), "Aujourd'hui, 08:12");
+  assert.equal(formatCleanTimestamp(ts, now, 'de'), 'Heute, 08:12');
+  assert.equal(formatCleanTimestamp(ts, now), 'Today, 08:12');
+  const yesterday = Math.floor(new Date(2026, 0, 1, 21, 5, 0).getTime() / 1000);
+  assert.equal(formatCleanTimestamp(yesterday, now, 'es'), 'Ayer, 21:05');
+  const older = Math.floor(new Date(2025, 11, 24, 7, 30, 0).getTime() / 1000);
+  assert.equal(formatCleanTimestamp(older, now, 'de'), '24.12., 07:30');
+  assert.equal(formatCleanTimestamp(older, now, 'fr'), '24/12, 07:30');
+  assert.equal(formatCleanTimestamp(0, now, 'de'), '—');
+});
+
+test('every widget text exists in every Gladys language (issue #13)', () => {
+  const content = buildMapWidgetContent(SAMPLE_MAP, {
+    imageKey: 'map-x',
+    vacuumExternalId: 'ext:roborock:vacuum:duid',
+    status: { state: 5, last_clean_t: 1, clean_area: 1e6, clean_time: 60 },
+    settings: { action1: 'quiet', action2: 'max' },
+    language: 'de',
+  });
+  const texts = [];
+  const collect = (value) => {
+    if (value && typeof value === 'object') {
+      if ('en' in value) {
+        texts.push(value);
+      } else {
+        Object.values(value).forEach(collect);
+      }
+    }
+  };
+  collect(content.components);
+  assert.ok(texts.length >= 12);
+  for (const text of texts) {
+    for (const language of WIDGET_LANGUAGES) {
+      assert.ok(text[language], `${JSON.stringify(text)} lacks ${language}`);
+    }
+  }
+  // the values the integration renders itself follow the language too
+  const status = content.components.find((c) => c.type === 'status');
+  assert.equal(status.items[0].value, 'Reinigung');
+  assert.match(status.items[1].value, /^(Heute|Gestern|\d\d\.\d\d\.), \d\d:\d\d$/);
 });

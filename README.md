@@ -41,18 +41,18 @@ Built on the JavaScript SDK
 
 Each **robot** exposes these features:
 
-| Feature         | Category / type                                    | Mapping                                                 |
-| --------------- | -------------------------------------------------- | ------------------------------------------------------- |
-| State           | `vacuum-cleaner` / `state`                         | miIO `state` → Gladys state (read-only)                 |
-| Run mode        | `vacuum-cleaner` / `run-mode`                      | Idle / Clean → `app_stop` / `app_start`                 |
-| Clean mode      | `vacuum-cleaner` / `clean-mode`                    | miIO `fan_power` ↔ Gladys clean mode (table below)      |
-| Dock            | `vacuum-cleaner` / `dock`                          | "Go home" (value 1) → `app_charge`                      |
-| Battery         | `battery` / `integer`                              | miIO `battery` (%), read-only, history kept             |
-| Main brush      | `unknown` / `unknown`                              | Remaining main-brush lifetime from `get_consumable` (%) |
-| Side brush      | `unknown` / `unknown`                              | Remaining side-brush lifetime from `get_consumable` (%) |
-| Filter          | `hepa-filter-monitoring` / `filter-life-remaining` | Remaining filter lifetime from `get_consumable` (%)     |
-| Sensor cleaning | `unknown` / `unknown`                              | Remaining time before sensor cleaning (%)               |
-| Routines        | `button` / `push`                                  | One button per Roborock cloud routine                   |
+| Feature         | Category / type                                    | Mapping                                                              |
+| --------------- | -------------------------------------------------- | -------------------------------------------------------------------- |
+| State           | `vacuum-cleaner` / `state`                         | miIO `state` → Gladys state (read-only)                              |
+| Run mode        | `vacuum-cleaner` / `run-mode`                      | Idle / Clean → `app_stop` / `app_start` (or the room selected below) |
+| Clean mode      | `vacuum-cleaner` / `clean-mode`                    | Vacuum / Vac & Mop / Mop, or the suction level (see below)           |
+| Dock            | `vacuum-cleaner` / `dock`                          | "Go home" (value 1) → `app_charge`                                   |
+| Battery         | `battery` / `integer`                              | miIO `battery` (%), read-only, history kept                          |
+| Main brush      | `unknown` / `unknown`                              | Remaining main-brush lifetime from `get_consumable` (%)              |
+| Side brush      | `unknown` / `unknown`                              | Remaining side-brush lifetime from `get_consumable` (%)              |
+| Filter          | `hepa-filter-monitoring` / `filter-life-remaining` | Remaining filter lifetime from `get_consumable` (%)                  |
+| Sensor cleaning | `unknown` / `unknown`                              | Remaining time before sensor cleaning (%)                            |
+| Routines        | `button` / `push`                                  | One button per Roborock cloud routine                                |
 
 Routines keep the complete setup saved in the Roborock app, including rooms,
 zones, order, cleaning mode and number of passes. They are fetched during
@@ -75,11 +75,35 @@ device with these maintenance features:
 Dock maintenance fields are model-dependent. Missing fields are ignored so docks
 that expose fewer counters remain compatible with the integration.
 
-### Fan power ↔ clean mode
+### Clean mode
 
-Gladys exposes a fixed list of clean modes; Roborock exposes suction levels.
-The five levels below are **verified on real hardware** (Roborock S6, firmware
-`3.5.8_2700`):
+Gladys exposes a fixed list of clean modes (_Auto_, _Quick_, _Quiet_, _Low
+noise_, _Deep clean_, _Vacuum_, _Mop_). The integration publishes, for each
+robot, only the ones it can honour (`supported_options`), and what they mean
+depends on the robot.
+
+**Mop-capable robots** (those whose status reports a water flow,
+`water_box_mode`: S7, S8, Qrevo, Saros...) have the three cleaning modes of
+the Roborock app. The Gladys clean mode maps to that choice, through
+`set_clean_motor_mode`:
+
+| Gladys clean mode | Roborock mode | What is sent                                                  |
+| ----------------- | ------------- | ------------------------------------------------------------- |
+| Auto              | Vac & Mop     | the robot's own suction, its last water flow, its mop route   |
+| Vacuum            | Vacuum        | the robot's own suction, water flow off (200)                 |
+| Mop               | Mop           | suction off (105), the robot's last water flow, its mop route |
+
+The suction level is then a separate setting: the widget buttons (_Quiet_,
+_Balanced_, _Turbo_, _Max_) and the `set_fan_power` scene action change it
+without touching the mode. The water flow sent is always one the robot itself
+reported, never a hard-coded code (a Saros only knows its own slider codes);
+`202` (standard) is used only when the robot never mopped since the
+integration started. "Vacuum then mop" has no known RPC yet and is not offered.
+This mapping comes from python-roborock and still awaits a confirmation on a
+real mop-capable robot (issue #13).
+
+**Suction-only robots** keep the historical mapping, **verified on real
+hardware** (Roborock S6, firmware `3.5.8_2700`):
 
 | Roborock level | Code | Gladys clean mode |
 | -------------- | ---- | ----------------- |
@@ -92,8 +116,16 @@ The five levels below are **verified on real hardware** (Roborock S6, firmware
 Code `106` ("auto") is **silently ignored** by the S6 — it falls back to 102 —
 so it is never written; it is only accepted on read, as an alias of _Auto_, for
 the models that report it. The Gladys _Quick_ and _Mop_ clean modes have no
-Roborock equivalent and are rejected with an explicit error rather than doing
-nothing.
+equivalent there and are not offered.
+
+### Rooms
+
+The _Room to clean_ selector starts a cleaning of that room right away
+(`app_segment_clean`). A robot already busy with a cleaning ignores that
+request, so it is stopped first. While a room is selected, _Cleaning_ in the
+run mode cleans **that room** (and resumes it when paused) instead of
+starting a full cleaning; clear the selector (—) to get a full cleaning back.
+The selector goes back to — once the room cleaning is over.
 
 ## Configuration
 

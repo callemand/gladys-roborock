@@ -32,6 +32,7 @@ import {
   vacuumExternalIds,
 } from './src/devices/convertDevice.js';
 import {
+  FAN_POWER_WIDGET_ACTION,
   MAP_WIDGET_KEY,
   buildMapWidgetContent,
   duidFromImageKey,
@@ -42,6 +43,7 @@ import {
   buildConsumableStates,
   buildDockStates,
   buildPollStates,
+  buildSegmentCleanCommand,
   buildSetCommand,
   consumablePercents,
   routineIdFromFeatureCode,
@@ -71,7 +73,10 @@ import {
   ROBOROCK_CLEANING_STATES,
   ROBOROCK_METHOD,
   ROBOROCK_SEGMENT_CLEANING_STATES,
+  ROBOROCK_STATE,
+  ROBOROCK_WATER_BOX_MODE,
   ROOM_SELECTION_NONE,
+  VACUUM_CLEANER_MODE,
 } from './src/constants.js';
 import { CODE_REFUSED, RoborockAccountClient } from './src/roborock/client.js';
 
@@ -116,6 +121,51 @@ const roomCleanings = new Map();
 // Permet de remettre à zéro une ancienne sélection après un redémarrage de
 // l'intégration, sans effacer une nouvelle sélection avant son démarrage.
 const initializedRoomSelectors = new Set();
+
+// Pièce (segment) actuellement choisie dans le sélecteur Gladys, par robot :
+// « Nettoyage » dans le mode de fonctionnement nettoie alors cette pièce au
+// lieu de lancer un nettoyage complet (issue #13).
+const selectedRooms = new Map();
+
+// Last status seen per robot (poll, widget, command) and the last non-off water
+// flow it reported: both feed the clean-mode commands of mop-capable robots
+// (see buildSetCommand), which keep the robot's own suction and water settings.
+const lastStatuses = new Map();
+const lastWaterBoxModes = new Map();
+
+function rememberStatus(duid, status) {
+  if (!status || typeof status !== 'object') {
+    return;
+  }
+  lastStatuses.set(duid, status);
+  const waterBoxMode = Number(status.water_box_mode);
+  if (Number.isFinite(waterBoxMode) && waterBoxMode !== ROBOROCK_WATER_BOX_MODE.OFF) {
+    lastWaterBoxModes.set(duid, waterBoxMode);
+  }
+}
+
+/**
+ * The current status of a robot, fetched right before a command (a poll is up
+ * to 30 s old). Falls back to the last known status when the robot does not
+ * answer, so the command still goes out.
+ * @param {string} duid the Roborock device id
+ * @returns {Promise<object>} the status (possibly empty)
+ */
+async function currentStatus(duid) {
+  try {
+    const status = await roborock.getStatus(duid);
+    rememberStatus(duid, status);
+    return status || {};
+  } catch (err) {
+    logger.warn(`Could not refresh the status of ${duid} before the command: ${err.message}`);
+    return lastStatuses.get(duid) || {};
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A robot busy with a cleaning ignores app_segment_clean: it is stopped first,
+// and gets a moment to settle before the new job is sent.
+const STOP_BEFORE_SEGMENT_CLEAN_MS = 1500;
 
 // Dernier instantané (snapshot) connu par robot, pour détecter les transitions
 // qui déclenchent les scènes. La première observation ne fait qu'amorcer le
@@ -446,15 +496,20 @@ async function publishDevices() {
   const discovered = [];
 
   for (const device of devices) {
-    discovered.push(convertDevice(gladys, device));
+    // The status tells whether the robot mops (which clean modes to offer) and
+    // whether it has a dock. Without it the robot is published as suction-only;
+    // the next publication corrects the options (the core upserts them).
+    let status = null;
     try {
-      const status = await roborock.getStatus(device.duid);
-      const dockType = Number(status && status.dock_type);
-      if (Number.isFinite(dockType) && dockType > 0) {
-        discovered.push(convertDockDevice(gladys, device, dockType));
-      }
+      status = await roborock.getStatus(device.duid);
+      rememberStatus(device.duid, status);
     } catch (err) {
-      logger.warn(`Could not detect a dock for ${device.duid}: ${err.message}`);
+      logger.warn(`Could not get the status of ${device.duid}: ${err.message}`);
+    }
+    discovered.push(convertDevice(gladys, device, status));
+    const dockType = Number(status && status.dock_type);
+    if (Number.isFinite(dockType) && dockType > 0) {
+      discovered.push(convertDockDevice(gladys, device, dockType));
     }
   }
 
@@ -494,6 +549,7 @@ gladys.onSetValue(async (device, feature, value) => {
   // L’option vide efface seulement la sélection. Le nettoyage complet reste
   // exclusivement piloté par le mode de fonctionnement.
   if (featureCode === FEATURE_CODES.ROOM && value === ROOM_SELECTION_NONE) {
+    selectedRooms.delete(duid);
     roomCleanings.delete(duid);
     initializedRoomSelectors.add(duid);
     return;
@@ -510,23 +566,76 @@ gladys.onSetValue(async (device, feature, value) => {
     return;
   }
 
-  const command = buildSetCommand(featureCode, value);
+  // These commands depend on what the robot is doing right now (and, for the
+  // clean mode, on what it is): ask it rather than trust a 30 s old poll.
+  const needsStatus = [FEATURE_CODES.RUN_MODE, FEATURE_CODES.CLEAN_MODE, FEATURE_CODES.ROOM];
+  const status = needsStatus.includes(featureCode) ? await currentStatus(duid) : {};
+  const roborockState = Number(status.state);
+  const isCleaning = ROBOROCK_CLEANING_STATES.has(roborockState);
+
+  if (featureCode === FEATURE_CODES.RUN_MODE && Number(value) === VACUUM_CLEANER_MODE.CLEANING) {
+    // "Cleaning" with a room selected cleans THAT room. Sent as app_start it
+    // would start a full cleaning instead — the Saros of issue #13 then showed
+    // "full cleaning" while the selector still named a room.
+    if (isCleaning) {
+      logger.info(`${duid} is already cleaning: nothing to start`);
+      return;
+    }
+    const selectedRoom = selectedRooms.get(duid);
+    if (roborockState === ROBOROCK_STATE.PAUSED && roomCleanings.has(duid)) {
+      await roborock.sendCommand(duid, ROBOROCK_METHOD.RESUME_SEGMENT_CLEAN, []);
+      return;
+    }
+    if (selectedRoom !== undefined) {
+      await startSegmentCleaning(duid, [selectedRoom]);
+      return;
+    }
+    await roborock.sendCommand(duid, ROBOROCK_METHOD.APP_START, []);
+    return;
+  }
+
+  if (featureCode === FEATURE_CODES.ROOM) {
+    const segmentId = Number(value);
+    if (!Number.isSafeInteger(segmentId) || segmentId < 0) {
+      throw new Error(`Feature "${feature.external_id}" is not controllable with value ${value}`);
+    }
+    selectedRooms.set(duid, segmentId);
+    if (isCleaning) {
+      // The robot ignores a room request while a cleaning runs (it kept going
+      // on the room of the PREVIOUS selection in issue #13): stop it first.
+      logger.info(`${duid} is cleaning: stopping it before cleaning room ${segmentId}`);
+      await roborock.sendCommand(duid, ROBOROCK_METHOD.APP_STOP, []);
+      await sleep(STOP_BEFORE_SEGMENT_CLEAN_MS);
+    }
+    await startSegmentCleaning(duid, [segmentId]);
+    return;
+  }
+
+  const command = buildSetCommand(featureCode, value, {
+    status,
+    waterBoxMode: lastWaterBoxModes.get(duid),
+  });
   if (!command) {
     throw new Error(`Feature "${feature.external_id}" is not controllable with value ${value}`);
   }
   await roborock.sendCommand(duid, command.method, command.params);
-
-  if (featureCode === FEATURE_CODES.ROOM) {
-    // La commande a été acceptée, mais le robot n’est peut-être pas encore
-    // passé en état segment_cleaning. Le prochain poll ne doit donc pas
-    // réinitialiser immédiatement le sélecteur.
-    roomCleanings.set(duid, {
-      active: false,
-    });
-
-    initializedRoomSelectors.add(duid);
-  }
 });
+
+/**
+ * Start a cleaning of the given segments and track it, so the room selector is
+ * only reset once that cleaning has been seen running and is over.
+ * @param {string} duid the Roborock device id
+ * @param {Array<number>} segments the segment ids
+ */
+async function startSegmentCleaning(duid, segments) {
+  const command = buildSegmentCleanCommand(segments);
+  await roborock.sendCommand(duid, command.method, command.params);
+  // La commande a été acceptée, mais le robot n’est peut-être pas encore
+  // passé en état segment_cleaning. Le prochain poll ne doit donc pas
+  // réinitialiser immédiatement le sélecteur.
+  roomCleanings.set(duid, { active: false });
+  initializedRoomSelectors.add(duid);
+}
 
 // --- Scene actions: a scene commands the robot -------------------------------
 // Each action carries a `vacuum` field (source: "devices"): its value is the
@@ -561,6 +670,8 @@ gladys.onSceneAction(SCENE_ACTIONS.SET_FAN_POWER, async (fields) => {
   if (cleanMode === undefined) {
     throw new Error(`Unknown fan power mode: "${fields.mode}"`);
   }
+  // A suction level, whatever the robot: the clean-mode mapping of the
+  // suction-only robots (no status passed) is exactly that.
   const command = buildSetCommand(FEATURE_CODES.CLEAN_MODE, cleanMode);
   if (!command) {
     throw new Error(`Fan power mode "${fields.mode}" is not controllable`);
@@ -575,7 +686,7 @@ gladys.onSceneAction(SCENE_ACTIONS.CLEAN_ROOMS, async (fields) => {
   if (segments.length === 0) {
     throw new Error(`No known room matched "${fields.rooms}"`);
   }
-  await roborock.sendCommand(duid, ROBOROCK_METHOD.APP_SEGMENT_CLEAN, [{ segments }]);
+  await startSegmentCleaning(duid, segments);
 });
 
 gladys.onSceneAction(SCENE_ACTIONS.RUN_ROUTINE, async (fields) => {
@@ -604,6 +715,7 @@ gladys.onPoll(async (device) => {
         return null;
       }),
     ]);
+    rememberStatus(duid, status);
     const ids = vacuumExternalIds(gladys, duid);
     states = [...buildPollStates(ids, status), ...buildConsumableStates(ids, consumable)];
 
@@ -627,6 +739,8 @@ gladys.onPoll(async (device) => {
     );
 
     if (roomSelectionFeedback) {
+      // the selector goes back to "—": the room is no longer selected
+      selectedRooms.delete(duid);
       states.push(roomSelectionFeedback);
     }
 
@@ -722,7 +836,7 @@ if (typeof mapLiveRefresh.unref === 'function') {
   mapLiveRefresh.unref();
 }
 
-gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
+gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings, language }) => {
   const vacuumExternalId = settings && settings.vacuum;
   if (!vacuumExternalId) {
     throw new Error('No vacuum selected for the map widget');
@@ -742,8 +856,38 @@ gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings }) => {
       .then((c) => consumablePercents(c))
       .catch(() => ({})),
   ]);
+  rememberStatus(duid, status);
   await publishTransport(duid, vacuumExternalId);
-  return buildMapWidgetContent(map, { imageKey, vacuumExternalId, status, consumables, settings });
+  return buildMapWidgetContent(map, {
+    imageKey,
+    vacuumExternalId,
+    status,
+    consumables,
+    settings,
+    language,
+  });
+});
+
+// The suction buttons of the widget: a suction change only, whatever the robot
+// (the clean-mode feature would switch a mop-capable robot between Vacuum,
+// Vac & Mop and Mop instead). The robot the widget shows comes from its settings.
+gladys.onWidgetAction(MAP_WIDGET_KEY, async (actionKey, params, { settings }) => {
+  if (actionKey !== FAN_POWER_WIDGET_ACTION) {
+    throw new Error(`Unknown widget action: ${actionKey}`);
+  }
+  const vacuumExternalId = settings && settings.vacuum;
+  if (!vacuumExternalId) {
+    throw new Error('No vacuum selected for the map widget');
+  }
+  const { duid } = parseExternalId(vacuumExternalId);
+  const level = String(params && params.level);
+  const cleanMode = FAN_POWER_MODES[level];
+  if (cleanMode === undefined) {
+    throw new Error(`Unknown suction level: "${level}"`);
+  }
+  logger.info(`onWidgetAction(map) <- ${duid} suction ${level}`);
+  const command = buildSetCommand(FEATURE_CODES.CLEAN_MODE, cleanMode);
+  await roborock.sendCommand(duid, command.method, command.params);
 });
 
 gladys.onWidgetGetImage(async (imageKey) => {

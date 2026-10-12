@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 
 import { WIDGET_COLORS } from '@gladysassistant/integration-sdk';
 
-import { FEATURE_CODES, VACUUM_CLEANER_CLEAN_MODE, VACUUM_CLEANER_MODE } from '../constants.js';
+import { FEATURE_CODES, VACUUM_CLEANER_MODE } from '../constants.js';
 
 export const MAP_WIDGET_KEY = 'map';
 
@@ -80,12 +80,17 @@ export function duidFromImageKey(key) {
   return duidByHashedKey.get(String(key || '')) || null;
 }
 
+// The widget action (onWidgetAction) behind the suction buttons: `params.level`
+// is a FAN_POWER_MODES key (quiet / balanced / turbo / max).
+export const FAN_POWER_WIDGET_ACTION = 'fan_power';
+
 // Catalogue of the actions the user can bind to the two configurable buttons.
-// Each maps to a device feature + value (relayed to onSetValue). Keys are the
-// stable values of the manifest `action1` / `action2` selects.
+// Each maps either to a device feature + value (relayed to onSetValue) or to a
+// widget action (relayed to onWidgetAction). Keys are the stable values of the
+// manifest `action1` / `action2` selects.
 export const WIDGET_ACTIONS = {
   start: {
-    label: { en: 'Start', fr: 'Démarrer' },
+    label: { en: 'Start', fr: 'Démarrer', de: 'Start', es: 'Iniciar' },
     icon: 'play',
     feature: FEATURE_CODES.RUN_MODE,
     value: VACUUM_CLEANER_MODE.CLEANING,
@@ -94,82 +99,131 @@ export const WIDGET_ACTIONS = {
     // RUN_MODE + IDLE maps to app_stop (not app_pause): this ends the cycle, it
     // does not pause it, so the button is labelled accordingly. A true pause is
     // available as the `pause_cleaning` scene action.
-    label: { en: 'Stop', fr: 'Arrêter' },
+    label: { en: 'Stop', fr: 'Arrêter', de: 'Stopp', es: 'Detener' },
     icon: 'square',
     feature: FEATURE_CODES.RUN_MODE,
     value: VACUUM_CLEANER_MODE.IDLE,
   },
   dock: {
-    label: { en: 'Dock', fr: 'Retour base' },
+    label: { en: 'Dock', fr: 'Retour base', de: 'Zur Station', es: 'A la base' },
     icon: 'home',
     feature: FEATURE_CODES.DOCK,
     value: 1,
   },
+  // The four suction levels: a suction change only, whatever the robot. They
+  // go through a widget action, NOT the clean-mode feature: on a mop-capable
+  // robot that feature is the Vacuum / Vac & Mop / Mop choice (issue #13), and
+  // "Max" would otherwise switch the robot to Vacuum only.
   quiet: {
-    label: { en: 'Quiet', fr: 'Silencieux' },
+    label: { en: 'Quiet', fr: 'Silencieux', de: 'Leise', es: 'Silencioso' },
     icon: 'moon',
-    feature: FEATURE_CODES.CLEAN_MODE,
-    value: VACUUM_CLEANER_CLEAN_MODE.QUIET,
+    action: FAN_POWER_WIDGET_ACTION,
+    level: 'quiet',
   },
   balanced: {
-    label: { en: 'Balanced', fr: 'Équilibré' },
+    label: { en: 'Balanced', fr: 'Équilibré', de: 'Standard', es: 'Equilibrado' },
     icon: 'wind',
-    feature: FEATURE_CODES.CLEAN_MODE,
-    value: VACUUM_CLEANER_CLEAN_MODE.AUTO,
+    action: FAN_POWER_WIDGET_ACTION,
+    level: 'balanced',
   },
   turbo: {
-    label: { en: 'Turbo', fr: 'Turbo' },
+    label: { en: 'Turbo', fr: 'Turbo', de: 'Turbo', es: 'Turbo' },
     icon: 'zap',
-    feature: FEATURE_CODES.CLEAN_MODE,
-    value: VACUUM_CLEANER_CLEAN_MODE.DEEP_CLEAN,
+    action: FAN_POWER_WIDGET_ACTION,
+    level: 'turbo',
   },
   max: {
-    label: { en: 'Max', fr: 'Max' },
+    label: { en: 'Max', fr: 'Max', de: 'Max', es: 'Máx' },
     icon: 'zap',
-    feature: FEATURE_CODES.CLEAN_MODE,
-    value: VACUUM_CLEANER_CLEAN_MODE.VACUUM,
+    action: FAN_POWER_WIDGET_ACTION,
+    level: 'max',
   },
 };
 
-// Roborock raw state code -> short French label for the status block.
+// The languages Gladys speaks. Every widget text exists in all four: the core
+// falls back to English for a missing language, which left a German dashboard
+// with a mix of English labels and French values (issue #13).
+export const WIDGET_LANGUAGES = ['en', 'fr', 'de', 'es'];
+const DEFAULT_LANGUAGE = 'en';
+
+/**
+ * Pick the text of a multi-language object in the given language (English,
+ * then the first available text, when it is missing).
+ * @param {object} texts the texts by language
+ * @param {string} [language] the Gladys user language
+ * @returns {string} the text
+ */
+function localized(texts, language) {
+  return texts[language] || texts[DEFAULT_LANGUAGE] || Object.values(texts).find(Boolean) || '';
+}
+
+// Roborock raw state code -> short label for the status block.
 const STATE_LABELS = {
-  2: 'À la base',
-  3: 'Au repos',
-  5: 'Nettoyage',
-  6: 'Retour à la base',
-  8: 'À la base',
-  10: 'En pause',
-  11: 'Nettoyage',
-  12: 'Erreur',
-  15: 'Retour à la base',
-  16: 'Déplacement',
-  17: 'Nettoyage zone',
-  18: 'Nettoyage pièce',
-  22: 'Vidage du bac',
-  23: 'Lavage serpillière',
-  25: 'Lavage serpillière',
-  26: 'Retour au lavage',
-  29: 'Cartographie',
-  100: 'À la base',
+  docked: { en: 'Docked', fr: 'À la base', de: 'An der Station', es: 'En la base' },
+  idle: { en: 'Idle', fr: 'Au repos', de: 'Bereit', es: 'En reposo' },
+  cleaning: { en: 'Cleaning', fr: 'Nettoyage', de: 'Reinigung', es: 'Limpiando' },
+  returning: { en: 'Returning to dock', fr: 'Retour à la base', de: 'Rückkehr', es: 'Volviendo' },
+  paused: { en: 'Paused', fr: 'En pause', de: 'Pausiert', es: 'En pausa' },
+  error: { en: 'Error', fr: 'Erreur', de: 'Fehler', es: 'Error' },
+  moving: { en: 'Moving', fr: 'Déplacement', de: 'Unterwegs', es: 'En movimiento' },
+  zone: { en: 'Zone cleaning', fr: 'Nettoyage zone', de: 'Zonenreinigung', es: 'Limpieza de zona' },
+  room: { en: 'Room cleaning', fr: 'Nettoyage pièce', de: 'Raumreinigung', es: 'Limpieza de sala' },
+  emptying: { en: 'Emptying the bin', fr: 'Vidage du bac', de: 'Entleerung', es: 'Vaciando' },
+  washing: {
+    en: 'Washing the mop',
+    fr: 'Lavage serpillière',
+    de: 'Mopp waschen',
+    es: 'Lavando mopa',
+  },
+  toWash: { en: 'Going to wash', fr: 'Retour au lavage', de: 'Zum Waschen', es: 'Yendo a lavar' },
+  mapping: { en: 'Mapping', fr: 'Cartographie', de: 'Kartierung', es: 'Mapeando' },
+  unknown: { en: 'Unknown', fr: 'Inconnu', de: 'Unbekannt', es: 'Desconocido' },
+};
+const STATE_KEYS = {
+  2: 'docked',
+  3: 'idle',
+  5: 'cleaning',
+  6: 'returning',
+  8: 'docked',
+  10: 'paused',
+  11: 'cleaning',
+  12: 'error',
+  15: 'returning',
+  16: 'moving',
+  17: 'zone',
+  18: 'room',
+  22: 'emptying',
+  23: 'washing',
+  25: 'washing',
+  26: 'toWash',
+  29: 'mapping',
+  100: 'docked',
 };
 
 /**
- * Short French label for a Roborock state code.
+ * Short label for a Roborock state code, in the given language.
  * @param {number} state the raw Roborock state
+ * @param {string} [language] the Gladys user language (defaults to English)
  * @returns {string} the label
  */
-export function roborockStateLabel(state) {
-  return STATE_LABELS[Number(state)] || 'Inconnu';
+export function roborockStateLabel(state, language = DEFAULT_LANGUAGE) {
+  return localized(STATE_LABELS[STATE_KEYS[Number(state)] || 'unknown'], language);
 }
 
+const DAY_WORDS = {
+  today: { en: 'Today', fr: "Aujourd'hui", de: 'Heute', es: 'Hoy' },
+  yesterday: { en: 'Yesterday', fr: 'Hier', de: 'Gestern', es: 'Ayer' },
+};
+
 /**
- * Format a cleaning timestamp as "Aujourd'hui, HH:MM" / "Hier, HH:MM" / "JJ/MM, HH:MM".
- * Uses the process local time zone.
+ * Format a cleaning timestamp as "Today, HH:MM" / "Yesterday, HH:MM" /
+ * "DD/MM, HH:MM" in the given language. Uses the process local time zone.
  * @param {number} tsSeconds unix timestamp in seconds
  * @param {number} [now] current time in ms (for testing)
+ * @param {string} [language] the Gladys user language (defaults to English)
  * @returns {string} the label
  */
-export function formatCleanTimestamp(tsSeconds, now = Date.now()) {
+export function formatCleanTimestamp(tsSeconds, now = Date.now(), language = DEFAULT_LANGUAGE) {
   if (!tsSeconds) {
     return '—';
   }
@@ -183,12 +237,15 @@ export function formatCleanTimestamp(tsSeconds, now = Date.now()) {
   const yesterday = new Date(ref);
   yesterday.setDate(ref.getDate() - 1);
   if (sameDay(d, ref)) {
-    return `Aujourd'hui, ${hhmm}`;
+    return `${localized(DAY_WORDS.today, language)}, ${hhmm}`;
   }
   if (sameDay(d, yesterday)) {
-    return `Hier, ${hhmm}`;
+    return `${localized(DAY_WORDS.yesterday, language)}, ${hhmm}`;
   }
-  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}, ${hhmm}`;
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  // German dates read day.month; the others day/month
+  return language === 'de' ? `${dd}.${mm}., ${hhmm}` : `${dd}/${mm}, ${hhmm}`;
 }
 
 /**
@@ -222,14 +279,11 @@ function percentRow(label, percent) {
 function actionButton(key, vacuumExternalId, style) {
   const a = WIDGET_ACTIONS[key];
   if (!a) return null;
-  return {
-    type: 'button',
-    label: a.label,
-    style,
-    icon: a.icon,
-    device_feature: `${vacuumExternalId}:${a.feature}`,
-    value: a.value,
-  };
+  const button = { type: 'button', label: a.label, style, icon: a.icon };
+  if (a.action) {
+    return { ...button, action: { key: a.action, params: { level: a.level } } };
+  }
+  return { ...button, device_feature: `${vacuumExternalId}:${a.feature}`, value: a.value };
 }
 
 /**
@@ -241,12 +295,22 @@ function actionButton(key, vacuumExternalId, style) {
  * @param {object} [params.status] the get_status result
  * @param {object} [params.consumables] remaining life % { mainBrush, sideBrush, filter, sensor }
  * @param {object} [params.settings] the widget instance settings (action1, action2)
+ * @param {string} [params.language] the Gladys user language, for the values the
+ *   integration renders itself (state, dates); labels carry every language
  * @param {number} [params.now] current time in ms (for testing)
  * @returns {object} a WidgetContent
  */
 export function buildMapWidgetContent(
   map,
-  { imageKey, vacuumExternalId, status = {}, consumables = {}, settings = {}, now = Date.now() },
+  {
+    imageKey,
+    vacuumExternalId,
+    status = {},
+    consumables = {},
+    settings = {},
+    language = DEFAULT_LANGUAGE,
+    now = Date.now(),
+  },
 ) {
   const surfaceM2 = Math.round((Number(status.clean_area) || 0) / 1e6);
   const maxArea = Math.max(homeAreaM2(map), surfaceM2, 1);
@@ -266,13 +330,13 @@ export function buildMapWidgetContent(
   const components = [
     {
       type: 'value',
-      label: { en: 'Battery', fr: 'Batterie' },
+      label: { en: 'Battery', fr: 'Batterie', de: 'Akku', es: 'Batería' },
       device_feature: `${v}:${FEATURE_CODES.BATTERY}`,
       icon: 'battery',
     },
     {
       type: 'gauge',
-      label: { en: 'Surface', fr: 'Surface' },
+      label: { en: 'Surface', fr: 'Surface', de: 'Fläche', es: 'Superficie' },
       value: Math.min(surfaceM2, maxArea),
       min: 0,
       max: maxArea,
@@ -282,34 +346,53 @@ export function buildMapWidgetContent(
     {
       type: 'image',
       key: imageKey,
-      alt: { en: 'Robot cleaning map', fr: 'Carte de nettoyage du robot' },
+      alt: {
+        en: 'Robot cleaning map',
+        fr: 'Carte de nettoyage du robot',
+        de: 'Reinigungskarte des Roboters',
+        es: 'Mapa de limpieza del robot',
+      },
       fit: 'contain',
     },
     {
       type: 'status',
       items: [
         {
-          label: { en: 'State', fr: 'État' },
-          value: roborockStateLabel(status.state),
+          label: { en: 'State', fr: 'État', de: 'Status', es: 'Estado' },
+          value: roborockStateLabel(status.state, language),
           color: WIDGET_COLORS.INFO,
         },
         {
           // status.last_clean_t is the END of the last cleaning; the dedicated
           // "last-clean-start" device feature exposes the START. Label the end
           // explicitly so the two are not read as the same instant.
-          label: { en: 'Last cleaning (end)', fr: 'Fin du dernier nettoyage' },
-          value: formatCleanTimestamp(Number(status.last_clean_t), now),
+          label: {
+            en: 'Last cleaning (end)',
+            fr: 'Fin du dernier nettoyage',
+            de: 'Letzte Reinigung (Ende)',
+            es: 'Última limpieza (fin)',
+          },
+          value: formatCleanTimestamp(Number(status.last_clean_t), now, language),
           color: WIDGET_COLORS.NEUTRAL,
         },
         {
-          label: { en: 'Duration', fr: 'Durée' },
+          label: { en: 'Duration', fr: 'Durée', de: 'Dauer', es: 'Duración' },
           value: `${durationMin} min`,
           color: WIDGET_COLORS.NEUTRAL,
         },
-        percentRow({ en: 'Filter', fr: 'Filtre' }, consumables.filter),
-        percentRow({ en: 'Main brush', fr: 'Brosse principale' }, consumables.mainBrush),
-        percentRow({ en: 'Side brush', fr: 'Brosse latérale' }, consumables.sideBrush),
-        percentRow({ en: 'Sensors', fr: 'Capteurs' }, consumables.sensor),
+        percentRow({ en: 'Filter', fr: 'Filtre', de: 'Filter', es: 'Filtro' }, consumables.filter),
+        percentRow(
+          { en: 'Main brush', fr: 'Brosse principale', de: 'Hauptbürste', es: 'Cepillo principal' },
+          consumables.mainBrush,
+        ),
+        percentRow(
+          { en: 'Side brush', fr: 'Brosse latérale', de: 'Seitenbürste', es: 'Cepillo lateral' },
+          consumables.sideBrush,
+        ),
+        percentRow(
+          { en: 'Sensors', fr: 'Capteurs', de: 'Sensoren', es: 'Sensores' },
+          consumables.sensor,
+        ),
       ],
     },
     ...buttons.filter(Boolean),

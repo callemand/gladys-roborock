@@ -532,6 +532,103 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
     assert.deepEqual(cmd.params, [101]);
   });
 
+  await t.test('a widget suction button only changes the fan power', async () => {
+    send('external-integration.widget.action', {
+      message_id: 'widget-max',
+      key: 'map',
+      action_key: 'fan_power',
+      params: { level: 'max' },
+      settings: { vacuum: pollDevice.external_id },
+    });
+    await waitUntil(
+      () => gladys.state.commandResults.some((r) => r.message_id === 'widget-max'),
+      `widget action ack\n${output}`,
+    );
+    assert.equal(
+      gladys.state.commandResults.find((r) => r.message_id === 'widget-max').success,
+      true,
+    );
+    const cmd = broker.commands.findLast((c) => c.method === 'set_custom_mode');
+    assert.deepEqual(cmd.params, [104]);
+    assert.ok(!broker.commands.some((c) => c.method === 'set_clean_motor_mode'));
+  });
+
+  // The room selector + "Cleaning" run mode, as a user drives them from the
+  // device card (issue #13: the two used to fight, app_start turning the room
+  // cleaning just requested into a full cleaning).
+  const setValue = async (messageId, featureCode, category, type, value) => {
+    send('external-integration.device.set-value', {
+      message_id: messageId,
+      device: pollDevice,
+      device_feature: {
+        external_id: `ext:${SELECTOR}:vacuum:${DUID}:${featureCode}`,
+        category,
+        type,
+      },
+      value,
+    });
+    await waitUntil(
+      () => gladys.state.commandResults.some((r) => r.message_id === messageId),
+      `${messageId} ack\n${output}`,
+    );
+    return gladys.state.commandResults.find((r) => r.message_id === messageId);
+  };
+  const methodsSince = (from) => broker.commands.slice(from).map((c) => c.method);
+
+  await t.test('selecting a room starts a segment cleaning of that room', async () => {
+    const from = broker.commands.length;
+    const result = await setValue('set-room', 'room', 'text', 'select', '16');
+    assert.equal(result.success, true);
+    const cmd = broker.commands.findLast((c) => c.method === 'app_segment_clean');
+    assert.ok(cmd, 'app_segment_clean sent');
+    assert.deepEqual(cmd.params, [{ segments: [16], repeat: 1 }]);
+    assert.ok(!methodsSince(from).includes('app_stop'), 'a docked robot is not stopped first');
+  });
+
+  await t.test('"Cleaning" with a room selected cleans that room, not the whole home', async () => {
+    const from = broker.commands.length;
+    const result = await setValue('set-run', 'run-mode', 'vacuum-cleaner', 'run-mode', 1);
+    assert.equal(result.success, true);
+    const methods = methodsSince(from);
+    assert.ok(!methods.includes('app_start'), `no full cleaning: ${methods}`);
+    const cmd = broker.commands.findLast((c) => c.method === 'app_segment_clean');
+    assert.deepEqual(cmd.params, [{ segments: [16], repeat: 1 }]);
+  });
+
+  await t.test('a new room while the robot cleans: stop first, then the new room', async () => {
+    STATUS.state = 5; // cleaning
+    try {
+      const from = broker.commands.length;
+      const result = await setValue('set-room-2', 'room', 'text', 'select', '17');
+      assert.equal(result.success, true);
+      const methods = methodsSince(from).filter((m) =>
+        ['app_stop', 'app_segment_clean', 'app_start'].includes(m),
+      );
+      assert.deepEqual(methods, ['app_stop', 'app_segment_clean']);
+      const cmd = broker.commands.findLast((c) => c.method === 'app_segment_clean');
+      assert.deepEqual(cmd.params, [{ segments: [17], repeat: 1 }]);
+
+      // "Cleaning" on a robot already cleaning changes nothing
+      const before = broker.commands.length;
+      await setValue('set-run-2', 'run-mode', 'vacuum-cleaner', 'run-mode', 1);
+      const sent = methodsSince(before).filter((m) => m !== 'get_status');
+      assert.deepEqual(sent, [], `nothing sent to a cleaning robot: ${sent}`);
+    } finally {
+      STATUS.state = 8;
+    }
+  });
+
+  await t.test('clearing the room selection sends nothing to the robot', async () => {
+    const from = broker.commands.length;
+    const result = await setValue('set-room-none', 'room', 'text', 'select', 'none');
+    assert.equal(result.success, true);
+    assert.deepEqual(methodsSince(from), []);
+    // ...and "Cleaning" is a full cleaning again
+    const result2 = await setValue('set-run-3', 'run-mode', 'vacuum-cleaner', 'run-mode', 1);
+    assert.equal(result2.success, true);
+    assert.ok(methodsSince(from).includes('app_start'), 'app_start sent');
+  });
+
   await t.test('a routine button executes the complete Roborock cloud scene', async () => {
     send('external-integration.device.set-value', {
       message_id: 'set-routine',
