@@ -15,8 +15,11 @@ import {
   buildDockFeatures,
   buildDockStates,
   buildPollStates,
+  buildSegmentCleanCommand,
   buildSetCommand,
   buildVacuumFeatures,
+  cleanModeFromStatus,
+  isMopCapable,
   routineIdFromFeatureCode,
 } from '../src/devices/vacuum.js';
 
@@ -446,16 +449,128 @@ test('buildSetCommand maps dock=1 to app_charge', () => {
 test('buildSetCommand maps a selected room to app_segment_clean', () => {
   assert.deepEqual(buildSetCommand(FEATURE_CODES.ROOM, '16'), {
     method: ROBOROCK_METHOD.APP_SEGMENT_CLEAN,
-    params: [
-      {
-        segments: [16],
-      },
-    ],
+    params: [{ segments: [16], repeat: 1 }],
+  });
+
+  assert.deepEqual(buildSegmentCleanCommand([16, 17]), {
+    method: ROBOROCK_METHOD.APP_SEGMENT_CLEAN,
+    params: [{ segments: [16, 17], repeat: 1 }],
   });
 
   assert.equal(buildSetCommand(FEATURE_CODES.ROOM, ROOM_SELECTION_NONE), null);
 
   assert.equal(buildSetCommand(FEATURE_CODES.ROOM, 'not-a-room'), null);
+});
+
+// --- Mop-capable robots (Saros 10R and friends, issue #13) -------------------
+
+const SAROS_STATUS = { state: 8, fan_power: 103, water_box_mode: 235, mop_mode: 300 };
+
+test('a robot reporting a water flow is mop-capable, an older one is not', () => {
+  assert.equal(isMopCapable(SAROS_STATUS), true);
+  assert.equal(isMopCapable({ state: 8, fan_power: 102 }), false);
+  assert.equal(isMopCapable(null), false);
+});
+
+test('the clean-mode options only list what the robot can do', () => {
+  const suctionOnly = buildVacuumFeatures(ids).find((f) => f.external_id.endsWith(':clean-mode'));
+  assert.deepEqual(
+    suctionOnly.supported_options.map((o) => o.value),
+    [
+      VACUUM_CLEANER_CLEAN_MODE.AUTO,
+      VACUUM_CLEANER_CLEAN_MODE.QUIET,
+      VACUUM_CLEANER_CLEAN_MODE.LOW_NOISE,
+      VACUUM_CLEANER_CLEAN_MODE.DEEP_CLEAN,
+      VACUUM_CLEANER_CLEAN_MODE.VACUUM,
+    ],
+  );
+
+  const mop = buildVacuumFeatures(ids, [], [], { mopCapable: true }).find((f) =>
+    f.external_id.endsWith(':clean-mode'),
+  );
+  assert.deepEqual(mop.supported_options, [
+    { value: VACUUM_CLEANER_CLEAN_MODE.AUTO, label: 'Vac & Mop', sort_order: 0 },
+    { value: VACUUM_CLEANER_CLEAN_MODE.VACUUM, label: 'Vacuum', sort_order: 1 },
+    { value: VACUUM_CLEANER_CLEAN_MODE.MOP, label: 'Mop', sort_order: 2 },
+  ]);
+  // the core refuses an option without a label
+  for (const option of [...suctionOnly.supported_options, ...mop.supported_options]) {
+    assert.ok(typeof option.label === 'string' && option.label.trim(), 'labelled option');
+  }
+});
+
+test('a mop-capable status reads as Vacuum / Vac & Mop / Mop, not as a suction level', () => {
+  // turbo suction + water on: Vac & Mop (AUTO), not DEEP_CLEAN
+  assert.equal(cleanModeFromStatus(SAROS_STATUS), VACUUM_CLEANER_CLEAN_MODE.AUTO);
+  // water off: Vacuum, whatever the suction
+  assert.equal(
+    cleanModeFromStatus({ ...SAROS_STATUS, water_box_mode: 200, fan_power: 104 }),
+    VACUUM_CLEANER_CLEAN_MODE.VACUUM,
+  );
+  // fan "off" (105) + water on: Mop only (105 is "gentle" on the older robots)
+  assert.equal(
+    cleanModeFromStatus({ ...SAROS_STATUS, fan_power: 105 }),
+    VACUUM_CLEANER_CLEAN_MODE.MOP,
+  );
+  assert.equal(cleanModeFromStatus({ fan_power: 105 }), VACUUM_CLEANER_CLEAN_MODE.LOW_NOISE);
+  assert.equal(cleanModeFromStatus({ water_box_mode: 202 }), undefined);
+
+  const states = buildPollStates(ids, { ...SAROS_STATUS, fan_power: 105 });
+  const cleanMode = states.find((s) => s.device_feature_external_id.endsWith(':clean-mode'));
+  assert.equal(cleanMode.state, VACUUM_CLEANER_CLEAN_MODE.MOP);
+});
+
+test('on a mop-capable robot the clean mode is set with set_clean_motor_mode', () => {
+  const context = { status: SAROS_STATUS };
+
+  // Vacuum: water off, the robot's own suction and route kept
+  assert.deepEqual(
+    buildSetCommand(FEATURE_CODES.CLEAN_MODE, VACUUM_CLEANER_CLEAN_MODE.VACUUM, context),
+    {
+      method: ROBOROCK_METHOD.SET_CLEAN_MOTOR_MODE,
+      params: [{ fan_power: 103, water_box_mode: 200, mop_mode: 300 }],
+    },
+  );
+
+  // Vac & Mop from Vacuum: the water flow the robot last reported, not a
+  // hard-coded 202 (a Saros only knows its own slider codes)
+  assert.deepEqual(
+    buildSetCommand(FEATURE_CODES.CLEAN_MODE, VACUUM_CLEANER_CLEAN_MODE.AUTO, {
+      status: { ...SAROS_STATUS, water_box_mode: 200 },
+      waterBoxMode: 235,
+    }),
+    {
+      method: ROBOROCK_METHOD.SET_CLEAN_MOTOR_MODE,
+      params: [{ fan_power: 103, water_box_mode: 235, mop_mode: 300 }],
+    },
+  );
+  // ...and 202 only when it never mopped since the integration started
+  assert.deepEqual(
+    buildSetCommand(FEATURE_CODES.CLEAN_MODE, VACUUM_CLEANER_CLEAN_MODE.AUTO, {
+      status: { state: 8, fan_power: 105, water_box_mode: 200 },
+    }).params,
+    [{ fan_power: 102, water_box_mode: 202 }],
+  );
+
+  // Mop: suction off, water on
+  assert.deepEqual(
+    buildSetCommand(FEATURE_CODES.CLEAN_MODE, VACUUM_CLEANER_CLEAN_MODE.MOP, context).params,
+    [{ fan_power: 105, water_box_mode: 235, mop_mode: 300 }],
+  );
+
+  // suction levels stay a suction change (widget buttons, scene action)...
+  assert.deepEqual(
+    buildSetCommand(FEATURE_CODES.CLEAN_MODE, VACUUM_CLEANER_CLEAN_MODE.QUIET, context),
+    {
+      method: ROBOROCK_METHOD.SET_FAN_POWER,
+      params: [101],
+    },
+  );
+  // ...except LOW_NOISE, whose code means "no suction" on these robots
+  assert.equal(
+    buildSetCommand(FEATURE_CODES.CLEAN_MODE, VACUUM_CLEANER_CLEAN_MODE.LOW_NOISE, context),
+    null,
+  );
 });
 
 test('routineIdFromFeatureCode accepts only valid routine feature codes', () => {

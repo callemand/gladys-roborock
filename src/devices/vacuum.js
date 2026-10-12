@@ -17,26 +17,85 @@ import {
 
 import {
   BATTERY_BOUNDS,
+  CLEAN_MODE_OPTIONS_MOP,
+  CLEAN_MODE_OPTIONS_SUCTION,
   CONSUMABLE_BOUNDS,
   CONSUMABLE_LIFETIME,
   CLEAN_MODE_TO_FAN_POWER,
   FAN_POWER_TO_CLEAN_MODE,
   FEATURE_CODES,
   ROBOROCK_CLEANING_STATES,
+  ROBOROCK_FAN_POWER,
   ROBOROCK_METHOD,
+  ROBOROCK_MOP_ROUTE_STANDARD,
   ROBOROCK_STATE_TO_GLADYS,
+  ROBOROCK_SUCTION_LEVELS,
+  ROBOROCK_WATER_BOX_MODE,
   ROOM_SELECTION_NONE,
+  VACUUM_CLEANER_CLEAN_MODE,
   VACUUM_CLEANER_MODE,
   VACUUM_CLEANER_STATE,
 } from '../constants.js';
 
 /**
+ * Whether a robot has the app's Vacuum / Vac & Mop / Mop cleaning modes: those
+ * robots report their water flow level in the status. Older robots (S5, S6...)
+ * only report the suction level.
+ * @param {object} status the get_status result
+ * @returns {boolean} true for a mop-capable robot
+ */
+export function isMopCapable(status) {
+  return toNumber(status && status.water_box_mode) !== null;
+}
+
+/**
+ * The Gladys clean modes a robot can be set to, as feature `supported_options`
+ * (the device card then only lists those).
+ * @param {boolean} mopCapable see isMopCapable()
+ * @returns {Array<{ value: number, label: string, sort_order: number }>} the options
+ */
+export function cleanModeSupportedOptions(mopCapable) {
+  const modes = mopCapable ? CLEAN_MODE_OPTIONS_MOP : CLEAN_MODE_OPTIONS_SUCTION;
+  return modes.map((option, index) => ({ ...option, sort_order: index }));
+}
+
+/**
+ * The Gladys clean mode currently reported by a robot.
+ *
+ * Mop-capable robots: the water flow decides between Vacuum (off) and the two
+ * mop modes; fan power 105 ("off") with water on is Mop only. Older robots:
+ * the suction level alone, through FAN_POWER_TO_CLEAN_MODE.
+ * @param {object} status the get_status result
+ * @returns {number|undefined} a VACUUM_CLEANER_CLEAN_MODE value, or undefined
+ */
+export function cleanModeFromStatus(status) {
+  const fanPower = toNumber(status && status.fan_power);
+  if (fanPower === null) {
+    return undefined;
+  }
+  if (!isMopCapable(status)) {
+    return FAN_POWER_TO_CLEAN_MODE[fanPower];
+  }
+  if (toNumber(status.water_box_mode) === ROBOROCK_WATER_BOX_MODE.OFF) {
+    return VACUUM_CLEANER_CLEAN_MODE.VACUUM;
+  }
+  if (fanPower === ROBOROCK_FAN_POWER.OFF) {
+    return VACUUM_CLEANER_CLEAN_MODE.MOP;
+  }
+  return VACUUM_CLEANER_CLEAN_MODE.AUTO;
+}
+
+/**
  * Build the Gladys features of a Roborock robot.
  * @param {object} ids external ids of the Gladys device (from gladys.externalIds()):
  *   `{ device, feature(featureKey) }`
+ * @param {Array} [routines] the account routines
+ * @param {Array} [rooms] the active-map rooms
+ * @param {object} [options] options
+ * @param {boolean} [options.mopCapable] see isMopCapable(); defaults to false
  * @returns {Array} Gladys device features
  */
-export function buildVacuumFeatures(ids, routines = [], rooms = []) {
+export function buildVacuumFeatures(ids, routines = [], rooms = [], { mopCapable = false } = {}) {
   const features = [
     {
       name: 'State',
@@ -68,6 +127,7 @@ export function buildVacuumFeatures(ids, routines = [], rooms = []) {
       max: 6,
       category: DEVICE_FEATURE_CATEGORIES.VACUUM_CLEANER,
       type: DEVICE_FEATURE_TYPES.VACUUM_CLEANER.CLEAN_MODE,
+      supported_options: cleanModeSupportedOptions(mopCapable),
     },
     {
       name: 'Dock',
@@ -271,8 +331,7 @@ export function buildPollStates(ids, status) {
     });
   }
 
-  const fanPower = toNumber(status && status.fan_power);
-  const cleanMode = fanPower === null ? undefined : FAN_POWER_TO_CLEAN_MODE[fanPower];
+  const cleanMode = cleanModeFromStatus(status);
   if (cleanMode !== undefined) {
     states.push({
       device_feature_external_id: ids.feature(FEATURE_CODES.CLEAN_MODE),
@@ -397,13 +456,73 @@ export function buildDockStates(ids, consumable) {
 }
 
 /**
+ * The RPC that starts a cleaning of the given segments.
+ * @param {Array<number>} segments the segment ids (from get_room_mapping)
+ * @returns {{ method: string, params: Array }} the RPC to send
+ */
+export function buildSegmentCleanCommand(segments) {
+  return {
+    method: ROBOROCK_METHOD.APP_SEGMENT_CLEAN,
+    params: [{ segments, repeat: 1 }],
+  };
+}
+
+/**
+ * The set_clean_motor_mode RPC switching a mop-capable robot to a Gladys clean
+ * mode. The suction level the robot currently uses is kept (unless it is the
+ * mop-only "off"); the water flow is the one the robot last used when mopping,
+ * so a Saros that only accepts its own slider codes never receives a code it
+ * does not know.
+ * @param {number} cleanMode a VACUUM_CLEANER_CLEAN_MODE value
+ * @param {object} context `{ status, waterBoxMode }`: the robot status and the
+ *   last non-off water flow it reported (optional, defaults to STANDARD)
+ * @returns {{ method: string, params: Array }|null} the RPC, or null when the
+ *   mode is not one of the three cleaning modes
+ */
+function buildCleanMotorModeCommand(cleanMode, { status = {}, waterBoxMode } = {}) {
+  const currentFan = toNumber(status.fan_power);
+  const fanPower = ROBOROCK_SUCTION_LEVELS.has(currentFan)
+    ? currentFan
+    : ROBOROCK_FAN_POWER.BALANCED;
+  const currentWater = toNumber(status.water_box_mode);
+  const mopWater =
+    (currentWater !== null && currentWater !== ROBOROCK_WATER_BOX_MODE.OFF && currentWater) ||
+    toNumber(waterBoxMode) ||
+    ROBOROCK_WATER_BOX_MODE.STANDARD;
+
+  let params;
+  switch (cleanMode) {
+    case VACUUM_CLEANER_CLEAN_MODE.VACUUM:
+      params = { fan_power: fanPower, water_box_mode: ROBOROCK_WATER_BOX_MODE.OFF };
+      break;
+    case VACUUM_CLEANER_CLEAN_MODE.AUTO:
+      params = { fan_power: fanPower, water_box_mode: mopWater };
+      break;
+    case VACUUM_CLEANER_CLEAN_MODE.MOP:
+      params = { fan_power: ROBOROCK_FAN_POWER.OFF, water_box_mode: mopWater };
+      break;
+    default:
+      return null;
+  }
+  // The mop route is only part of the setting on robots that report one.
+  const currentRoute = toNumber(status.mop_mode);
+  if (currentRoute !== null) {
+    params.mop_mode = currentRoute || ROBOROCK_MOP_ROUTE_STANDARD;
+  }
+  return { method: ROBOROCK_METHOD.SET_CLEAN_MOTOR_MODE, params: [params] };
+}
+
+/**
  * Map a Gladys command to the Roborock RPC to send. Returns null when the
  * command is not actionable (e.g. an unmapped clean mode, or dock=0).
  * @param {string} featureCode last segment of the feature external id
  * @param {number} value value sent by Gladys
+ * @param {object} [context] what is known of the robot, for the clean mode:
+ *   `{ status, waterBoxMode }` (see buildCleanMotorModeCommand). Without a
+ *   status the robot is taken for a suction-only one.
  * @returns {{ method: string, params: Array }|null} the RPC to send
  */
-export function buildSetCommand(featureCode, value) {
+export function buildSetCommand(featureCode, value, context = {}) {
   switch (featureCode) {
     case FEATURE_CODES.RUN_MODE:
       // CLEANING starts a cycle, IDLE stops it. MAPPING is not a command.
@@ -415,6 +534,18 @@ export function buildSetCommand(featureCode, value) {
       }
       return null;
     case FEATURE_CODES.CLEAN_MODE: {
+      if (isMopCapable(context.status)) {
+        const motorMode = buildCleanMotorModeCommand(value, context);
+        if (motorMode) {
+          return motorMode;
+        }
+        // QUIET / DEEP_CLEAN keep meaning "suction level" (widget buttons, the
+        // set_fan_power scene action). LOW_NOISE is refused: its code (105) is
+        // "no suction" on these robots, which would silently switch to Mop.
+        if (value === VACUUM_CLEANER_CLEAN_MODE.LOW_NOISE) {
+          return null;
+        }
+      }
       const fanPower = CLEAN_MODE_TO_FAN_POWER[value];
       return fanPower === undefined
         ? null
@@ -423,14 +554,7 @@ export function buildSetCommand(featureCode, value) {
     case FEATURE_CODES.ROOM: {
       const segmentId = toNumber(value);
       return Number.isSafeInteger(segmentId) && segmentId >= 0
-        ? {
-            method: ROBOROCK_METHOD.APP_SEGMENT_CLEAN,
-            params: [
-              {
-                segments: [segmentId],
-              },
-            ],
-          }
+        ? buildSegmentCleanCommand([segmentId])
         : null;
     }
     case FEATURE_CODES.DOCK:

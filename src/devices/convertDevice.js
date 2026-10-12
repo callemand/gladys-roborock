@@ -12,7 +12,7 @@
 // -----------------------------------------------------------------------------
 
 import { POLL_FREQUENCY } from '../constants.js';
-import { buildDockFeatures, buildVacuumFeatures } from './vacuum.js';
+import { buildDockFeatures, buildVacuumFeatures, isMopCapable } from './vacuum.js';
 import { buildCleanedTodayFeature, buildLastCleanStartFeature } from './lastClean.js';
 
 export const VACUUM_SLUG = 'vacuum';
@@ -60,9 +60,11 @@ export function dockExternalIds(gladys, duid) {
  * Convert a Roborock robot into a Gladys discovered device.
  * @param {import('@gladysassistant/integration-sdk').GladysIntegration} gladys
  * @param {object} device a Roborock device (from RoborockClient.listDevices())
+ * @param {object} [status] the robot get_status result, when known: it decides
+ *   which clean modes the robot offers (see isMopCapable)
  * @returns {object} Gladys discovered device
  */
-export function convertDevice(gladys, device) {
+export function convertDevice(gladys, device, status = null) {
   const ids = vacuumExternalIds(gladys, device.duid);
   return {
     name: device.name,
@@ -71,7 +73,9 @@ export function convertDevice(gladys, device) {
     poll_frequency: POLL_FREQUENCY,
     should_poll: true,
     features: withFeatureSelectors([
-      ...buildVacuumFeatures(ids, device.routines, device.rooms),
+      ...buildVacuumFeatures(ids, device.routines, device.rooms, {
+        mopCapable: isMopCapable(status),
+      }),
       buildLastCleanStartFeature(ids),
       buildCleanedTodayFeature(ids),
     ]),
