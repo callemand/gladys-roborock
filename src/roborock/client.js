@@ -27,6 +27,21 @@ const logger = createLogger({ name: 'roborock:client' });
 
 const LOCAL_COOLDOWN_MS = 5 * 60 * 1000;
 
+// Log-friendly rendering of RPC params / results (one line, bounded).
+const COMPACT_MAX = 300;
+function compact(value) {
+  let text;
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  if (text === undefined) {
+    return 'undefined';
+  }
+  return text.length > COMPACT_MAX ? `${text.slice(0, COMPACT_MAX)}… (${text.length} chars)` : text;
+}
+
 // Set as `error.reason` on a login failure, so index.js can phrase it in the
 // user's language instead of forwarding an English sentence.
 export const CREDENTIALS_REFUSED = 'roborock_credentials_refused';
@@ -385,6 +400,9 @@ export class RoborockAccountClient {
       attempts.push(attempt);
       if (attempt.ok) {
         this.lastTransport.set(duid, transport);
+        logger.debug(
+          `Map of ${duid} received via ${transport} (${attempt.frame?.payloadLength ?? '?'} bytes)`,
+        );
         return { ...attempt, attempts };
       }
       if (transport === 'local') {
@@ -530,15 +548,40 @@ export class RoborockAccountClient {
   }
 
   async #localRpc(local, duid, method, params) {
-    const result = await local.request(method, params);
-    this.lastTransport.set(duid, 'local');
-    return result;
+    return this.#loggedRpc('local', duid, method, params, () => local.request(method, params));
   }
 
   async #cloudRpc(duid, method, params) {
-    const result = await this.mqtt.request(duid, method, params);
-    this.lastTransport.set(duid, 'cloud');
-    return result;
+    return this.#loggedRpc('cloud', duid, method, params, () =>
+      this.mqtt.request(duid, method, params),
+    );
+  }
+
+  /**
+   * Run one RPC and log it: every command the robot receives, the transport it
+   * went through, how long it took and what came back. The read-only polls
+   * (get_*) are logged at debug level, everything that acts on the robot at
+   * info level, so a default log level shows exactly what Gladys asked the robot
+   * to do and when.
+   */
+  async #loggedRpc(transport, duid, method, params, send) {
+    const isRead = method.startsWith('get_');
+    const log = isRead ? logger.debug.bind(logger) : logger.info.bind(logger);
+    const startedAt = Date.now();
+    log(`RPC ${method} ${compact(params)} -> ${duid} via ${transport}`);
+    try {
+      const result = await send();
+      this.lastTransport.set(duid, transport);
+      log(
+        `RPC ${method} <- ${duid} via ${transport} in ${Date.now() - startedAt} ms: ${compact(result)}`,
+      );
+      return result;
+    } catch (err) {
+      logger.warn(
+        `RPC ${method} <- ${duid} via ${transport} FAILED after ${Date.now() - startedAt} ms: ${err.message}`,
+      );
+      throw err;
+    }
   }
 
   async #getLocalTransport(duid) {
@@ -550,9 +593,13 @@ export class RoborockAccountClient {
     }
     const ip = await this.#discoverLocalIp(duid);
     if (!ip) {
+      logger.info(
+        `No LAN IP known for ${duid}: cloud only for the next ${LOCAL_COOLDOWN_MS / 1000} s`,
+      );
       this.#coolDownLocal(duid);
       return null;
     }
+    logger.info(`Opening the local (LAN) transport to ${duid} at ${ip}`);
     const transport = new RoborockLocalTransport(duid, ip, this.localKeys.get(duid));
     this.localTransports.set(duid, transport);
     return transport;
@@ -585,6 +632,9 @@ export class RoborockAccountClient {
     this.localCooldownUntil.set(duid, Date.now() + LOCAL_COOLDOWN_MS);
     const transport = this.localTransports.get(duid);
     if (transport) {
+      logger.info(
+        `Closing the local transport to ${duid}: cloud only for the next ${LOCAL_COOLDOWN_MS / 1000} s`,
+      );
       transport.disconnect();
       this.localTransports.delete(duid);
     }

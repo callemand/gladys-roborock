@@ -327,6 +327,7 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
   });
   child.stdout.on('data', (d) => {
     output += d;
+    if (process.env.E2E_ECHO) process.stdout.write(d);
   });
   child.stderr.on('data', (d) => {
     output += d;
@@ -686,6 +687,7 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
   });
   child.stdout.on('data', (d) => {
     output += d;
+    if (process.env.E2E_ECHO) process.stdout.write(d);
   });
   child.stderr.on('data', (d) => {
     output += d;
@@ -844,6 +846,7 @@ test('an account with no robot still counts as linked', async (t) => {
   });
   child.stdout.on('data', (d) => {
     output += d;
+    if (process.env.E2E_ECHO) process.stdout.write(d);
   });
   child.stderr.on('data', (d) => {
     output += d;
