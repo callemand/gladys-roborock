@@ -71,6 +71,12 @@ jobs:
             gladys-assistant-integration.json > "$tmp"
           mv "$tmp" gladys-assistant-integration.json
 
+          # jq re-indents the manifest its own way; put it back in the
+          # repository style, otherwise the CI of the next branch fails on
+          # `prettier --check` for a file nobody touched.
+          npm ci --ignore-scripts
+          npx prettier --write gladys-assistant-integration.json
+
           echo "version=${new_version}" >> "$GITHUB_OUTPUT"
 
       # Note: if the branch you release from is protected against direct pushes,
