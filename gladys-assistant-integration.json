@@ -9,7 +9,7 @@
   },
   "version": "2.7.1",
   "docker_image": "ghcr.io/callemand/gladys-roborock:2.7.1",
-  "gladys_version": ">=5.1.0",
+  "gladys_version": ">=5.2.0",
   "cover_image": "https://raw.githubusercontent.com/callemand/gladys-roborock/main/cover.jpg",
   "transports": ["local", "cloud"],
   "config_schema": [
