@@ -109,7 +109,7 @@ export function buildVacuumFeatures(ids, routines = [], rooms = [], { mopCapable
       type: DEVICE_FEATURE_TYPES.VACUUM_CLEANER.STATE,
     },
     {
-      name: 'Run mode',
+      name: 'Start / stop',
       external_id: ids.feature(FEATURE_CODES.RUN_MODE),
       read_only: false,
       has_feedback: true,
@@ -119,7 +119,10 @@ export function buildVacuumFeatures(ids, routines = [], rooms = [], { mopCapable
       type: DEVICE_FEATURE_TYPES.VACUUM_CLEANER.RUN_MODE,
     },
     {
-      name: 'Clean mode',
+      // What this select rules depends on the robot: the app's cleaning type on
+      // a mop-capable one, the suction level on the others. Say so in the name
+      // (issue #13: two "mode" rows side by side read as the same thing).
+      name: mopCapable ? 'Cleaning type (vacuum / mop)' : 'Suction power',
       external_id: ids.feature(FEATURE_CODES.CLEAN_MODE),
       read_only: false,
       has_feedback: true,

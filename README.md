@@ -41,18 +41,18 @@ Built on the JavaScript SDK
 
 Each **robot** exposes these features:
 
-| Feature         | Category / type                                    | Mapping                                                              |
-| --------------- | -------------------------------------------------- | -------------------------------------------------------------------- |
-| State           | `vacuum-cleaner` / `state`                         | miIO `state` → Gladys state (read-only)                              |
-| Run mode        | `vacuum-cleaner` / `run-mode`                      | Idle / Clean → `app_stop` / `app_start` (or the room selected below) |
-| Clean mode      | `vacuum-cleaner` / `clean-mode`                    | Vacuum / Vac & Mop / Mop, or the suction level (see below)           |
-| Dock            | `vacuum-cleaner` / `dock`                          | "Go home" (value 1) → `app_charge`                                   |
-| Battery         | `battery` / `integer`                              | miIO `battery` (%), read-only, history kept                          |
-| Main brush      | `unknown` / `unknown`                              | Remaining main-brush lifetime from `get_consumable` (%)              |
-| Side brush      | `unknown` / `unknown`                              | Remaining side-brush lifetime from `get_consumable` (%)              |
-| Filter          | `hepa-filter-monitoring` / `filter-life-remaining` | Remaining filter lifetime from `get_consumable` (%)                  |
-| Sensor cleaning | `unknown` / `unknown`                              | Remaining time before sensor cleaning (%)                            |
-| Routines        | `button` / `push`                                  | One button per Roborock cloud routine                                |
+| Feature                       | Category / type                                    | Mapping                                                                                  |
+| ----------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| State                         | `vacuum-cleaner` / `state`                         | miIO `state` → Gladys state (read-only)                                                  |
+| Start / stop                  | `vacuum-cleaner` / `run-mode`                      | Idle / Clean → `app_stop` / `app_start` (or the room selected below)                     |
+| Cleaning type / Suction power | `vacuum-cleaner` / `clean-mode`                    | Vacuum / Vac & Mop / Mop on a mop-capable robot, the suction level otherwise (see below) |
+| Dock                          | `vacuum-cleaner` / `dock`                          | "Go home" (value 1) → `app_charge`                                                       |
+| Battery                       | `battery` / `integer`                              | miIO `battery` (%), read-only, history kept                                              |
+| Main brush                    | `unknown` / `unknown`                              | Remaining main-brush lifetime from `get_consumable` (%)                                  |
+| Side brush                    | `unknown` / `unknown`                              | Remaining side-brush lifetime from `get_consumable` (%)                                  |
+| Filter                        | `hepa-filter-monitoring` / `filter-life-remaining` | Remaining filter lifetime from `get_consumable` (%)                                      |
+| Sensor cleaning               | `unknown` / `unknown`                              | Remaining time before sensor cleaning (%)                                                |
+| Routines                      | `button` / `push`                                  | One button per Roborock cloud routine                                                    |
 
 Routines keep the complete setup saved in the Roborock app, including rooms,
 zones, order, cleaning mode and number of passes. They are fetched during

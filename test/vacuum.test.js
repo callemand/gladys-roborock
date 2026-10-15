@@ -466,6 +466,19 @@ test('buildSetCommand maps a selected room to app_segment_clean', () => {
 
 const SAROS_STATUS = { state: 8, fan_power: 103, water_box_mode: 235, mop_mode: 300 };
 
+test('the clean-mode feature is named after what it rules on the robot', () => {
+  const nameOf = (features) => features.find((f) => f.external_id.endsWith(':clean-mode')).name;
+  assert.equal(nameOf(buildVacuumFeatures(ids)), 'Suction power');
+  assert.equal(
+    nameOf(buildVacuumFeatures(ids, [], [], { mopCapable: true })),
+    'Cleaning type (vacuum / mop)',
+  );
+  assert.equal(
+    buildVacuumFeatures(ids).find((f) => f.external_id.endsWith(':run-mode')).name,
+    'Start / stop',
+  );
+});
+
 test('a robot reporting a water flow is mop-capable, an older one is not', () => {
   assert.equal(isMopCapable(SAROS_STATUS), true);
   assert.equal(isMopCapable({ state: 8, fan_power: 102 }), false);
