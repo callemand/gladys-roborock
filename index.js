@@ -77,6 +77,7 @@ import {
   ROBOROCK_WATER_BOX_MODE,
   ROOM_SELECTION_NONE,
   VACUUM_CLEANER_MODE,
+  describeState,
 } from './src/constants.js';
 import { CODE_REFUSED, RoborockAccountClient } from './src/roborock/client.js';
 
@@ -199,9 +200,17 @@ async function publishSceneTriggers(device, duid, status, consumable) {
       await gladys.publishSceneEvent(event.key, event.data);
     }
 
-    if (snapshot.sessionActive) {
+    for (const event of events) {
+      logger.info(`Scene trigger ${event.key} fired for ${duid}`);
+    }
+
+    if (snapshot.sessionActive && !cleaningDuids.has(duid)) {
+      logger.info(
+        `${duid}: cleaning session started, map refreshed every ${MAP_LIVE_REFRESH_MS / 1000} s`,
+      );
       cleaningDuids.add(duid);
-    } else {
+    } else if (!snapshot.sessionActive && cleaningDuids.has(duid)) {
+      logger.info(`${duid}: cleaning session over, map back to the normal refresh rate`);
       cleaningDuids.delete(duid);
     }
   } catch (err) {
@@ -263,12 +272,44 @@ function buildRoomSelectionFeedback(duid, ids, status, hasRoomSelector) {
     return null;
   }
 
+  logger.info(
+    `${duid}: room selector reset (${
+      trackedCleaning?.active ? 'the room cleaning is over' : 'integration start'
+    }, state ${describeState(roborockState)})`,
+  );
   roomCleanings.delete(duid);
 
   return {
     device_feature_external_id: ids.feature(FEATURE_CODES.ROOM),
     text: ROOM_SELECTION_NONE,
   };
+}
+
+// Last state logged per robot: a state change is worth its own line.
+const lastLoggedStates = new Map();
+
+/**
+ * One log line per poll with what matters when diagnosing a cleaning (state,
+ * error, modes, progress), plus a dedicated line when the state changes.
+ * @param {string} duid the Roborock device id
+ * @param {object} status the get_status result
+ */
+function logPolledStatus(duid, status) {
+  const s = status || {};
+  const state = Number(s.state);
+  const previous = lastLoggedStates.get(duid);
+  if (previous !== undefined && previous !== state) {
+    logger.info(`${duid}: state ${describeState(previous)} -> ${describeState(state)}`);
+  }
+  lastLoggedStates.set(duid, state);
+  logger.info(
+    `poll ${duid}: state=${describeState(state)} error=${s.error_code ?? '-'} ` +
+      `in_cleaning=${s.in_cleaning ?? '-'} in_returning=${s.in_returning ?? '-'} ` +
+      `fan=${s.fan_power ?? '-'} water=${s.water_box_mode ?? '-'} route=${s.mop_mode ?? '-'} ` +
+      `battery=${s.battery ?? '-'} clean_time=${s.clean_time ?? '-'}s clean_area=${
+        s.clean_area !== undefined ? Math.round(Number(s.clean_area) / 1e6) : '-'
+      }m² map_status=${s.map_status ?? '-'} dock_error=${s.dock_error_status ?? '-'}`,
+  );
 }
 
 /**
@@ -572,6 +613,13 @@ gladys.onSetValue(async (device, feature, value) => {
   const status = needsStatus.includes(featureCode) ? await currentStatus(duid) : {};
   const roborockState = Number(status.state);
   const isCleaning = ROBOROCK_CLEANING_STATES.has(roborockState);
+  if (needsStatus.includes(featureCode)) {
+    logger.info(
+      `${duid} before the command: state ${describeState(roborockState)}, ` +
+        `selected room ${selectedRooms.get(duid) ?? 'none'}, ` +
+        `tracked room cleaning ${roomCleanings.has(duid) ? 'yes' : 'no'}`,
+    );
+  }
 
   if (featureCode === FEATURE_CODES.RUN_MODE && Number(value) === VACUUM_CLEANER_MODE.CLEANING) {
     // "Cleaning" with a room selected cleans THAT room. Sent as app_start it
@@ -716,6 +764,7 @@ gladys.onPoll(async (device) => {
       }),
     ]);
     rememberStatus(duid, status);
+    logPolledStatus(duid, status);
     const ids = vacuumExternalIds(gladys, duid);
     states = [...buildPollStates(ids, status), ...buildConsumableStates(ids, consumable)];
 
@@ -803,9 +852,15 @@ async function renderMapForDuid(duid) {
     if (!roborock.isLoggedIn() && !(await connect())) {
       throw new Error('The Roborock account is not linked yet');
     }
+    const startedAt = Date.now();
+    logger.debug(`Fetching the map of ${duid} (cache ttl ${ttl / 1000} s expired)`);
     const map = await roborock.getMap(duid, { includePixels: true });
     const base64 = renderMapPngBase64(map);
     const imageKey = mapImageKey(duid, mapSignature(base64));
+    logger.debug(
+      `Map of ${duid} rendered in ${Date.now() - startedAt} ms: ${map.segments?.length ?? 0} segments, ` +
+        `${map.namedSegmentCount ?? 0} named, key ${imageKey}`,
+    );
     cacheMapImage(imageKey, base64);
     const entry = { at: Date.now(), map, base64, imageKey };
     mapRenderCache.set(duid, entry);
