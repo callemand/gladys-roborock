@@ -34,6 +34,29 @@ import { md5, md5hex } from './crypto.js';
 const logger = createLogger({ name: 'roborock:rest' });
 
 const REQUEST_TIMEOUT_MS = 15000;
+
+// Clock drift between this machine and Roborock (learnt from the HTTP `Date`
+// header). Below IGNORE it is header rounding; from WARN on the user is told;
+// a 401 is retried with the corrected time when the correction is above RETRY.
+const CLOCK_SKEW_IGNORE_MS = 5 * 1000;
+const CLOCK_SKEW_WARN_MS = 60 * 1000;
+const CLOCK_SKEW_RETRY_MS = 30 * 1000;
+
+// Set as `error.reason` when the IoT API refuses a Hawk signature (HTTP 401).
+export const IOT_SIGNATURE_REFUSED = 'roborock_iot_signature_refused';
+
+/**
+ * "+20 min 12 s" / "-3 s": a clock offset for the logs.
+ * @param {number} offsetMs the offset in milliseconds
+ * @returns {string} the label
+ */
+export function describeOffset(offsetMs) {
+  const sign = offsetMs < 0 ? '-' : '+';
+  const total = Math.round(Math.abs(offsetMs) / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${sign}${minutes} min ${seconds} s` : `${sign}${seconds} s`;
+}
 // Codes that mean "this region does not host that account", so the next one is
 // worth trying: `username or password error` from the password endpoint, and
 // `user not exist` from the code one. Verified against the live API on an
@@ -57,6 +80,21 @@ export class RoborockRestClient {
     this.rriot = session.rriot || null;
     this.baseUrl = session.baseUrl || null;
     this.username = session.username || null;
+    // Roborock's clock minus ours, learnt from the `Date` header of its
+    // answers. The Hawk signature of the IoT API carries a timestamp that the
+    // server checks against ITS clock: a host whose clock drifted (seen on the
+    // forum: 20 min ahead, every IoT call answered 401 right after a successful
+    // login) must sign with Roborock's time, not its own.
+    this.clockOffsetMs = 0;
+    this.clockOffsetWarned = false;
+  }
+
+  /**
+   * The current time as Roborock sees it, in seconds (for the Hawk signature).
+   * @returns {number} unix seconds
+   */
+  roborockNowSeconds() {
+    return Math.floor((Date.now() + this.clockOffsetMs) / 1000);
   }
 
   isLoggedIn() {
@@ -308,25 +346,77 @@ export class RoborockRestClient {
    * @param {string} path the request path
    * @returns {Promise<object>} the parsed JSON response
    */
-  async #hawkRequest(path, method = 'GET') {
+  async #hawkRequest(path, method = 'GET', { retried = false } = {}) {
     const { rriot } = this;
     const apiBase = rriot.r.a.replace(/\/+$/, '');
-    const timestamp = Math.floor(Date.now() / 1000);
+    const timestamp = this.roborockNowSeconds();
     const nonce = crypto.randomBytes(6).toString('base64url');
     // params and payload are empty for a plain GET: the two trailing colons of
     // the signed string matter.
     const prestr = `${rriot.u}:${rriot.s}:${nonce}:${timestamp}:${md5hex(path)}::`;
     const mac = crypto.createHmac('sha256', rriot.h).update(prestr).digest('base64');
     const authorization = `Hawk id="${rriot.u}",s="${rriot.s}",ts="${timestamp}",nonce="${nonce}",mac="${mac}"`;
-    return this.#fetchJson(`${apiBase}${path}`, {
-      method,
-      headers: { Authorization: authorization },
-    });
+    const offsetBefore = this.clockOffsetMs;
+    try {
+      return await this.#fetchJson(`${apiBase}${path}`, {
+        method,
+        headers: { Authorization: authorization },
+      });
+    } catch (err) {
+      if (err.status !== 401) {
+        throw err;
+      }
+      // A 401 right after a successful login is nearly always the signature
+      // timestamp, i.e. our clock. The 401 answer carried Roborock's time
+      // (#fetchJson learnt it): when it moved us, sign again with it, once.
+      if (!retried && Math.abs(this.clockOffsetMs - offsetBefore) > CLOCK_SKEW_RETRY_MS) {
+        logger.warn(
+          `Roborock IoT API refused the signature of ${method} ${path} (HTTP 401): ` +
+            `retrying with Roborock's clock (${describeOffset(this.clockOffsetMs)})`,
+        );
+        return this.#hawkRequest(path, method, { retried: true });
+      }
+      const refused = new Error(
+        `Roborock IoT API refused the request signature: ${method} ${path} -> HTTP 401 ` +
+          `(clock offset with Roborock: ${describeOffset(this.clockOffsetMs)})`,
+        { cause: err },
+      );
+      refused.status = 401;
+      refused.reason = IOT_SIGNATURE_REFUSED;
+      throw refused;
+    }
   }
 
   #assertLoggedIn() {
     if (!this.isLoggedIn()) {
       throw new Error('Roborock cloud is not connected');
+    }
+  }
+
+  /**
+   * Learn Roborock's clock from the `Date` header of an answer (any answer: a
+   * 401 carries one too). A drift past the threshold is logged once, with the
+   * fix: the signature is corrected from here, but a wrong clock breaks other
+   * things (TLS, schedules) and belongs to the host.
+   * @param {Response} response the fetch response
+   */
+  #learnClock(response) {
+    const date = response.headers.get('date');
+    const serverMs = date ? Date.parse(date) : NaN;
+    if (!Number.isFinite(serverMs)) {
+      return;
+    }
+    // The header has a 1 s resolution: a drift below the threshold is noise.
+    const offsetMs = serverMs - Date.now();
+    this.clockOffsetMs = Math.abs(offsetMs) < CLOCK_SKEW_IGNORE_MS ? 0 : offsetMs;
+    if (!this.clockOffsetWarned && Math.abs(offsetMs) >= CLOCK_SKEW_WARN_MS) {
+      this.clockOffsetWarned = true;
+      const drift = describeOffset(Math.abs(offsetMs)).slice(1); // no sign
+      logger.warn(
+        `The clock of this machine is ${drift} ${offsetMs > 0 ? 'behind' : 'ahead of'} Roborock's ` +
+          `(Roborock: ${date}). The requests are signed with Roborock's time from now on, ` +
+          'but the clock should be fixed (NTP / time synchronisation of the host).',
+      );
     }
   }
 
@@ -336,6 +426,7 @@ export class RoborockRestClient {
       headers: { Accept: 'application/json', ...headers },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    this.#learnClock(response);
     if (!response.ok) {
       const error = new Error(`Roborock request failed: ${method} -> HTTP ${response.status}`);
       error.status = response.status;

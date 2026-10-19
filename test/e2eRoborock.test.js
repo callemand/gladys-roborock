@@ -112,12 +112,21 @@ async function startFakeBroker() {
 }
 
 // --- Fake Roborock REST API --------------------------------------------------
-function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
+// `clockSkewMs`: Roborock's clock runs that far from ours. Like the real IoT
+// API, a Hawk signature whose timestamp is more than a minute away from
+// Roborock's clock is refused with a 401 (the forum case: a host 20 min ahead,
+// every IoT call refused right after a successful login). `behaviour.rejectHawk`
+// refuses every signature, whatever its timestamp.
+function startFakeRoborock(brokerPort, { emptyHome = false, clockSkewMs = 0 } = {}) {
   const requests = [];
+  const behaviour = { rejectHawk: false };
+  const roborockNow = () => Date.now() + clockSkewMs;
   const server = createServer((req, res) => {
     req.on('data', () => {});
     req.on('end', () => {
       const url = new URL(req.url, 'http://localhost');
+      const authorization = String(req.headers.authorization || '');
+      const hawkTs = /ts="(\d+)"/.exec(authorization);
       requests.push({
         method: req.method,
         path: url.pathname,
@@ -125,9 +134,24 @@ function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
         // Roborock derives it from (email, deviceId) and issues the code FOR it:
         // presenting another one on the login refuses the code
         clientId: req.headers.header_clientid,
+        hawkTs: hawkTs ? Number(hawkTs[1]) : null,
       });
       const base = `http://127.0.0.1:${server.address().port}`;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const headers = {
+        'Content-Type': 'application/json',
+        Date: new Date(roborockNow()).toUTCString(),
+      };
+      if (authorization.startsWith('Hawk ')) {
+        const staleBy = Math.abs(
+          (hawkTs ? Number(hawkTs[1]) : 0) - Math.floor(roborockNow() / 1000),
+        );
+        if (behaviour.rejectHawk || staleBy > 60) {
+          res.writeHead(401, headers);
+          res.end(JSON.stringify({ success: false, msg: 'unauthorized' }));
+          return;
+        }
+      }
+      res.writeHead(200, headers);
 
       if (url.pathname === '/api/v1/login') {
         // the password endpoint is no longer used by the integration: answer as
@@ -220,7 +244,9 @@ function startFakeRoborock(brokerPort, { emptyHome = false } = {}) {
     });
   });
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve({ server, requests, port: server.address().port }));
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ server, requests, behaviour, port: server.address().port }),
+    );
   });
 }
 
@@ -661,7 +687,8 @@ test('the integration drives a robot on a ROBOROCK account', async (t) => {
 
 test('a Roborock account is linked with the code Roborock emails', async (t) => {
   const broker = await startFakeBroker();
-  const roborock = await startFakeRoborock(broker.port);
+  const CLOCK_SKEW_MS = 20 * 60 * 1000;
+  const roborock = await startFakeRoborock(broker.port, { clockSkewMs: CLOCK_SKEW_MS });
   // Nothing stored yet: the email alone, as after a first save. There is no
   // password anywhere in this flow — the code login covers every account,
   // including the many that have no password at all.
@@ -760,6 +787,51 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     assert.match(result.data.message.fr, /ne sert qu'une fois/);
   });
 
+  await t.test('a login that works but an IoT API that refuses keeps the session', async () => {
+    // The forum case: the code is accepted, then every signed call is 401. The
+    // session must survive, or the user burns one single-use code per attempt.
+    roborock.behaviour.rejectHawk = true;
+    try {
+      const result = await runAction('roborock_link', { code: EMAIL_CODE });
+      assert.equal(result.success, true, result.error);
+      assert.match(result.data.message.fr, /compte est lié/);
+      assert.match(result.data.message.fr, /horloge/);
+      assert.match(result.data.message.fr, /[Aa]ucun nouveau code/);
+      await waitUntil(
+        () => gladys.state.configPosts.some((c) => c.session_roborock_token === 'account-token'),
+        `session persisted despite the 401\n${output}`,
+      );
+      const status = gladys.state.connectionStatusPosts.at(-1);
+      assert.equal(status.connected, false);
+    } finally {
+      roborock.behaviour.rejectHawk = false;
+    }
+  });
+
+  await t.test('a scan then loads the robots without another code', async () => {
+    const before = gladys.state.discoveredDevicePosts.length;
+    gladys.state.ws.send(
+      JSON.stringify({
+        type: 'external-integration.scan-request',
+        payload: { message_id: 'scan-after-401' },
+      }),
+    );
+    await waitUntil(
+      () => gladys.state.discoveredDevicePosts.length > before,
+      `robots loaded by the scan\n${output}`,
+    );
+    assert.equal(gladys.state.discoveredDevicePosts.at(-1).length, 1);
+    assert.equal(
+      roborock.requests.filter(
+        (r) => r.path === '/api/v1/loginWithCode' && r.query.get('verifycode') === EMAIL_CODE,
+      ).length,
+      1,
+      'the code was used once',
+    );
+    // the robots were loaded again from the SAME session (no new login)
+    assert.equal(gladys.state.connectionStatusPosts.at(-1).connected, true);
+  });
+
   await t.test('the right code links the account and publishes the robot', async () => {
     const before = gladys.state.discoveredDevicePosts.length;
     const result = await runAction('roborock_link', { code: EMAIL_CODE });
@@ -775,6 +847,24 @@ test('a Roborock account is linked with the code Roborock emails', async (t) => 
     const status = gladys.state.connectionStatusPosts.at(-1);
     assert.equal(status.connected, true);
     assert.match(status.message.fr, new RegExp(OTHER_EMAIL));
+  });
+
+  await t.test("the IoT requests are signed with Roborock's clock, not ours", async () => {
+    // Roborock runs 20 min ahead here: a signature with OUR time is refused.
+    const signed = roborock.requests.filter((r) => r.hawkTs !== null);
+    assert.ok(signed.length > 0, 'Hawk-signed requests were made');
+    for (const r of signed) {
+      const skew = Math.abs(r.hawkTs * 1000 - (Date.now() + CLOCK_SKEW_MS));
+      assert.ok(
+        skew < 60 * 1000,
+        `${r.path} signed ${Math.round(skew / 1000)} s off Roborock's clock`,
+      );
+    }
+    assert.ok(
+      !roborock.requests.some((r) => r.path.startsWith('/v3/user/homes') && r.hawkTs === null),
+      'the IoT API was never called unsigned',
+    );
+    assert.match(output, /clock of this machine is (19 min 5\d s|20 min \d s) behind Roborock's/);
   });
 
   await t.test('presents the same client id as the one the code was issued for', async () => {

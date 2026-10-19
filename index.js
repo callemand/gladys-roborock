@@ -79,7 +79,8 @@ import {
   VACUUM_CLEANER_MODE,
   describeState,
 } from './src/constants.js';
-import { CODE_REFUSED, RoborockAccountClient } from './src/roborock/client.js';
+import { CODE_REFUSED, DEVICES_LOAD_FAILED, RoborockAccountClient } from './src/roborock/client.js';
+import { IOT_SIGNATURE_REFUSED } from './src/roborock/restClient.js';
 
 const gladys = new GladysIntegration();
 
@@ -479,6 +480,23 @@ function describeFailure(err) {
       fr: "Ce code a été refusé. Un code ne sert qu'une fois et expire vite : demandez-en un nouveau et saisissez celui-là.",
     };
   }
+  if (err.reason === DEVICES_LOAD_FAILED && err.cause?.reason === IOT_SIGNATURE_REFUSED) {
+    return {
+      en:
+        'The account is linked, but Roborock refuses the signed requests (HTTP 401). This nearly always means the clock of ' +
+        'the machine running Gladys is wrong: synchronise it (NTP), then restart the integration. No new code is needed.',
+      fr:
+        'Le compte est lié, mais Roborock refuse les requêtes signées (HTTP 401). Cela vient presque toujours de ' +
+        "l'horloge de la machine qui fait tourner Gladys : synchronisez-la (NTP), puis redémarrez l'intégration. " +
+        'Aucun nouveau code n’est nécessaire.',
+    };
+  }
+  if (err.reason === DEVICES_LOAD_FAILED) {
+    return {
+      en: `The account is linked, but the robots could not be loaded: ${err.cause?.message || err.message}. The integration retries by itself; no new code is needed.`,
+      fr: `Le compte est lié, mais les robots n'ont pas pu être chargés : ${err.cause?.message || err.message}. L'intégration réessaie d'elle-même ; aucun nouveau code n'est nécessaire.`,
+    };
+  }
   return {
     en: `Connection failed: ${err.message}`,
     fr: `Échec de la connexion : ${err.message}`,
@@ -577,6 +595,12 @@ gladys.onScanRequest(async () => {
   logger.info('onScanRequest -> loading the robots of the account');
   if (!roborock.isLoggedIn() && !(await connect())) {
     throw new Error('The Roborock account is not linked yet');
+  }
+  if (roborock.listDevices().length === 0) {
+    // Linked, but the robots were never loaded (the link ended on a load
+    // failure, see roborock_link): a scan is the user's way to try again.
+    await roborock.login();
+    await reportStatus(true, linkedMessage());
   }
   await publishDevices();
 });
@@ -1013,6 +1037,11 @@ gladys.onAction('roborock_link', async (fields) => {
     await roborock.linkWithEmailCode(roborockEmail, code);
   } catch (err) {
     logger.error('Could not link the Roborock account', err);
+    if (err.linked) {
+      // The session is valid: keep it, so the next start (or the hourly retry)
+      // loads the robots without burning another single-use code.
+      await persistSession();
+    }
     await reportStatus(false, describeFailure(err));
     return describeFailure(err);
   }
