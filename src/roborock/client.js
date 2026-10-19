@@ -47,6 +47,8 @@ function compact(value) {
 export const CREDENTIALS_REFUSED = 'roborock_credentials_refused';
 export const CODE_REFUSED = 'roborock_code_refused';
 export const TWO_STEP_REQUIRED = 'roborock_two_step_required';
+// The login succeeded but loading the robots did not: the session is valid.
+export const DEVICES_LOAD_FAILED = 'roborock_devices_load_failed';
 // What the Roborock API answers for "username or password error", and for
 // "need two-step validate" — the latter means the password WAS accepted and a
 // code sent to the account owner is required on top of it.
@@ -184,7 +186,23 @@ export class RoborockAccountClient {
       }
       throw err;
     }
-    await this.#loadDevices();
+    try {
+      await this.#loadDevices();
+    } catch (err) {
+      // The account IS linked (the session is valid and worth keeping): only
+      // the robots could not be loaded. Say so, otherwise the caller drops the
+      // session and the user burns one single-use code per attempt (forum:
+      // every IoT call answered 401 because of the host clock).
+      const partial = new Error(
+        `Account linked, but the robots could not be loaded: ${err.message}`,
+        {
+          cause: err,
+        },
+      );
+      partial.reason = DEVICES_LOAD_FAILED;
+      partial.linked = true;
+      throw partial;
+    }
   }
 
   // --- Silent login (every restart) ------------------------------------------
