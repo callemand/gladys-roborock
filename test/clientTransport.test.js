@@ -119,3 +119,30 @@ test('the map follows the same preference', async () => {
     );
   }
 });
+
+test('concurrent requests open the local transport once', async () => {
+  // A poll sends get_status and get_consumable together. Each used to discover
+  // the IP and open its own socket; the first caller now opens, the other waits.
+  const calls = [];
+  const client = new RoborockAccountClient({}, { preferLocal: true });
+  client.localKeys.set(DUID, 'local-key');
+  client.mqtt = {
+    async request(duid, method) {
+      calls.push(method);
+      if (method === 'get_network_info') {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // nothing listens there: the local attempt fails fast and falls back
+        return { ip: '127.0.0.1' };
+      }
+      return 'from-cloud';
+    },
+    async disconnect() {},
+  };
+  const results = await Promise.all([
+    client.sendCommand(DUID, 'get_status', []),
+    client.sendCommand(DUID, 'get_consumable', []),
+  ]);
+  assert.deepEqual(results, ['from-cloud', 'from-cloud']);
+  assert.equal(calls.filter((m) => m === 'get_network_info').length, 1, 'one IP discovery');
+  await client.logout();
+});
