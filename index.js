@@ -922,8 +922,17 @@ gladys.onWidgetGet(MAP_WIDGET_KEY, async ({ settings, language }) => {
   }
   const { duid } = parseExternalId(vacuumExternalId);
   logger.info(`onWidgetGet(map) <- ${duid}`);
-  const { map, base64, imageKey } = await renderMapForDuid(duid);
-  cacheMapImage(imageKey, base64);
+  // The map is fetched only when the widget shows it, or the surface tile
+  // (whose scale is the mapped home area). A widget reduced to the status
+  // block and the buttons costs the robot nothing.
+  const needsMap = settings.show_map !== false || settings.show_surface !== false;
+  let map = null;
+  let imageKey;
+  if (needsMap) {
+    const rendered = await renderMapForDuid(duid);
+    ({ map, imageKey } = rendered);
+    cacheMapImage(imageKey, rendered.base64);
+  }
   // The map image is ready; gather the live numbers for the tiles / status block.
   const [status, consumables] = await Promise.all([
     roborock.getStatus(duid).catch((err) => {

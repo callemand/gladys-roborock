@@ -99,6 +99,51 @@ test('buildMapWidgetContent is accepted by the core validator', () => {
   }
 });
 
+test('the battery tile, the surface tile and the map are each optional', () => {
+  const build = (settings) =>
+    buildMapWidgetContent(SAMPLE_MAP, {
+      imageKey: 'map-x',
+      vacuumExternalId: 'ext:roborock:vacuum:duid',
+      status: { state: 8, clean_area: 12e6 },
+      settings,
+    });
+  const types = (content) => content.components.map((c) => c.type);
+
+  // on by default
+  assert.deepEqual(types(build({})).slice(0, 3), ['value', 'gauge', 'image']);
+  assert.deepEqual(
+    types(build({ show_battery: true, show_surface: true, show_map: true })).slice(0, 3),
+    ['value', 'gauge', 'image'],
+  );
+
+  const noBattery = build({ show_battery: false });
+  assert.deepEqual(types(noBattery).slice(0, 2), ['gauge', 'image']);
+  assert.deepEqual(validateWidgetContent(noBattery), []);
+
+  const noMap = build({ show_map: false });
+  assert.ok(!types(noMap).includes('image'));
+  assert.deepEqual(validateWidgetContent(noMap), []);
+
+  // status block and buttons only: no map at all, the surface scale still works
+  const bare = buildMapWidgetContent(null, {
+    vacuumExternalId: 'ext:roborock:vacuum:duid',
+    status: { state: 8, clean_area: 12e6 },
+    settings: { show_battery: false, show_surface: false, show_map: false },
+  });
+  assert.deepEqual(types(bare).slice(0, 1), ['status']);
+  assert.deepEqual(validateWidgetContent(bare), []);
+
+  // the surface tile without a map scales on the surface itself
+  const surfaceOnly = buildMapWidgetContent(null, {
+    vacuumExternalId: 'ext:roborock:vacuum:duid',
+    status: { state: 8, clean_area: 12e6 },
+    settings: { show_battery: false, show_map: false },
+  });
+  const gauge = surfaceOnly.components.find((c) => c.type === 'gauge');
+  assert.equal(gauge.value, 12);
+  assert.equal(gauge.max, 12);
+});
+
 test('configured action "none" adds no button', () => {
   const v = `ext:roborock:vacuum:${DUID}`;
   const content = buildMapWidgetContent(SAMPLE_MAP, {
