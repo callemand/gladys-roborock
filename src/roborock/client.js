@@ -90,6 +90,7 @@ export class RoborockAccountClient {
     this.localKeys = new Map(); // duid -> localKey
     this.localIps = new Map(); // duid -> ip
     this.localTransports = new Map(); // duid -> RoborockLocalTransport
+    this.localTransportOpening = new Map(); // duid -> Promise<transport|null>
     this.localCooldownUntil = new Map(); // duid -> timestamp
     this.lastTransport = new Map(); // duid -> 'local' | 'cloud'
   }
@@ -609,6 +610,20 @@ export class RoborockAccountClient {
     if (this.localTransports.has(duid)) {
       return this.localTransports.get(duid);
     }
+    // A poll fires get_status and get_consumable together: both reached this
+    // point before either had stored a transport, and two sockets were opened
+    // to the same robot (seen in the forum logs, "Opening the local transport"
+    // twice in the same millisecond). The first caller opens, the others wait.
+    if (!this.localTransportOpening.has(duid)) {
+      this.localTransportOpening.set(
+        duid,
+        this.#openLocalTransport(duid).finally(() => this.localTransportOpening.delete(duid)),
+      );
+    }
+    return this.localTransportOpening.get(duid);
+  }
+
+  async #openLocalTransport(duid) {
     const ip = await this.#discoverLocalIp(duid);
     if (!ip) {
       logger.info(
