@@ -288,9 +288,11 @@ function actionButton(key, vacuumExternalId, style) {
 
 /**
  * Build the full vacuum widget content (tiles + map + status + buttons).
- * @param {object} map a parsed map (from client.getMap, room names attached)
+ * @param {object|null} map a parsed map (from client.getMap, room names attached),
+ *   or null when neither the map nor the surface tile is shown
  * @param {object} params parameters
- * @param {string} params.imageKey the image key declared in the content
+ * @param {string} [params.imageKey] the image key declared in the content (none
+ *   without a map)
  * @param {string} params.vacuumExternalId the vacuum device external_id
  * @param {object} [params.status] the get_status result
  * @param {object} [params.consumables] remaining life % { mainBrush, sideBrush, filter, sensor }
@@ -313,9 +315,14 @@ export function buildMapWidgetContent(
   },
 ) {
   const surfaceM2 = Math.round((Number(status.clean_area) || 0) / 1e6);
-  const maxArea = Math.max(homeAreaM2(map), surfaceM2, 1);
+  const maxArea = Math.max(map ? homeAreaM2(map) : 0, surfaceM2, 1);
   const durationMin = Math.round((Number(status.clean_time) || 0) / 60);
   const v = vacuumExternalId;
+  // The battery tile, the surface tile and the map are each optional (widget
+  // settings, on by default): two robot widgets of different brands can then
+  // be aligned side by side. The tiles row is a flex row: a lone tile takes the
+  // whole width by itself.
+  const show = (key) => settings[key] !== false;
 
   // Start + Dock are fixed; the other two buttons are user-configured. Kept to
   // 4 buttons (the SDK cap) so the whole card stays within the 8-component
@@ -328,13 +335,13 @@ export function buildMapWidgetContent(
   }
 
   const components = [
-    {
+    show('show_battery') && {
       type: 'value',
       label: { en: 'Battery', fr: 'Batterie', de: 'Akku', es: 'Batería' },
       device_feature: `${v}:${FEATURE_CODES.BATTERY}`,
       icon: 'battery',
     },
-    {
+    show('show_surface') && {
       type: 'gauge',
       label: { en: 'Surface', fr: 'Surface', de: 'Fläche', es: 'Superficie' },
       value: Math.min(surfaceM2, maxArea),
@@ -343,17 +350,18 @@ export function buildMapWidgetContent(
       unit: 'm²',
       color: WIDGET_COLORS.PRIMARY,
     },
-    {
-      type: 'image',
-      key: imageKey,
-      alt: {
-        en: 'Robot cleaning map',
-        fr: 'Carte de nettoyage du robot',
-        de: 'Reinigungskarte des Roboters',
-        es: 'Mapa de limpieza del robot',
+    show('show_map') &&
+      imageKey && {
+        type: 'image',
+        key: imageKey,
+        alt: {
+          en: 'Robot cleaning map',
+          fr: 'Carte de nettoyage du robot',
+          de: 'Reinigungskarte des Roboters',
+          es: 'Mapa de limpieza del robot',
+        },
+        fit: 'contain',
       },
-      fit: 'contain',
-    },
     {
       type: 'status',
       items: [
@@ -398,5 +406,5 @@ export function buildMapWidgetContent(
     ...buttons.filter(Boolean),
   ];
 
-  return { ttl_seconds: 120, components };
+  return { ttl_seconds: 120, components: components.filter(Boolean) };
 }

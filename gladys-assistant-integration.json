@@ -114,6 +114,39 @@
           }
         },
         {
+          "key": "show_battery",
+          "type": "boolean",
+          "default": true,
+          "label": {
+            "en": "Battery tile",
+            "fr": "Tuile batterie",
+            "de": "Akku-Kachel",
+            "es": "Mosaico batería"
+          }
+        },
+        {
+          "key": "show_surface",
+          "type": "boolean",
+          "default": true,
+          "label": {
+            "en": "Cleaned surface tile",
+            "fr": "Tuile surface nettoyée",
+            "de": "Kachel gereinigte Fläche",
+            "es": "Mosaico superficie limpiada"
+          }
+        },
+        {
+          "key": "show_map",
+          "type": "boolean",
+          "default": true,
+          "label": {
+            "en": "Map",
+            "fr": "Carte",
+            "de": "Karte",
+            "es": "Mapa"
+          }
+        },
+        {
           "key": "action1",
           "type": "select",
           "default": "quiet",
